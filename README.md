@@ -4,8 +4,13 @@
 
 SecGraphAI is a local-first Python toolkit for describing an AI application's security
 graph, declaring security invariants, collecting deterministic evidence, protecting
-Python tools at runtime, and producing actionable scan reports. Version 0.1 is an alpha
-that establishes the safe, extensible core described in the product requirements.
+Python tools at runtime, and producing actionable scan reports. Version 0.9 is a beta
+that exposes the product-requirements architecture as composable security primitives.
+
+It includes OpenAPI/identity, RAG, MCP, provenance and policy testing; adaptive attack
+selection and signed packs; baselines, safe replay bundles, pytest regression generation,
+SARIF/JUnit output; OWASP profiles, CycloneDX and offline CVE intelligence; plugin process
+isolation; and an authenticated, local-only dashboard API.
 
 ## Install
 
@@ -69,4 +74,3 @@ python -m build
 ## Security
 
 Please read [SECURITY.md](SECURITY.md) before reporting a vulnerability.
-
