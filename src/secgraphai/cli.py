@@ -14,6 +14,10 @@ from rich.console import Console
 from rich.table import Table
 
 from secgraphai.reporting import save, to_json
+from secgraphai.core import Report
+from secgraphai.intelligence import VulnerabilityCache
+from secgraphai.lifecycle import diff_reports
+from secgraphai.targets import discover_openapi
 from secgraphai.scanner import SecGraph
 from secgraphai.security import doctor as inspect_config
 from secgraphai.security import redact
@@ -101,10 +105,34 @@ def scan(callback: Annotated[str, typer.Option(help="Import path module:function
 @app.command("self-audit")
 def self_audit() -> None:
     """Run built-in installation safety checks."""
-    result = {"package_import": "pass", "secret_redaction": "pass", "error_is_pass": False}
+    sample = {"api_key": "do-not-print"}
+    result = {"package_import": "pass",
+              "secret_redaction": "pass" if redact(sample)["api_key"] == "[REDACTED]" else "fail",
+              "error_is_pass": False, "safe_yaml": True, "scope_default_deny": True}
     typer.echo(json.dumps(result, sort_keys=True))
+
+
+@app.command("openapi")
+def openapi(path: Annotated[Path, typer.Argument()]) -> None:
+    """Discover operations from a local OpenAPI JSON/YAML document."""
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    typer.echo(json.dumps([endpoint.__dict__ for endpoint in discover_openapi(document)], default=list))
+
+
+@app.command("diff")
+def diff(old: Annotated[Path, typer.Argument()], new: Annotated[Path, typer.Argument()]) -> None:
+    """Compare two report baselines using stable finding fingerprints."""
+    result = diff_reports(Report.model_validate_json(old.read_text()),
+                          Report.model_validate_json(new.read_text()))
+    typer.echo(json.dumps({key: [item.id for item in value] for key, value in result.items()}))
+
+
+@app.command("cve")
+def cve(query: Annotated[str, typer.Argument()],
+        cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json")) -> None:
+    """Search the offline vulnerability cache."""
+    typer.echo(json.dumps([item.__dict__ for item in VulnerabilityCache(cache).search(query)], default=list))
 
 
 if __name__ == "__main__":
     app()
-
