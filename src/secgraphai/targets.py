@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import product
-from typing import Any, Callable, Iterable
+import inspect
+import json
+import os
+import time
+from typing import Any, Awaitable, Callable, Iterable, Protocol
+
+import httpx
 
 from secgraphai.canary import CanaryFactory
+from secgraphai.security import ScopeGuard
 
 
 @dataclass(frozen=True)
@@ -44,6 +51,11 @@ class Identity:
     name: str
     tenant: str | None = None
     roles: frozenset[str] = frozenset()
+    token_env: str | None = None
+
+    def authorization(self) -> str | None:
+        token = os.environ.get(self.token_env) if self.token_env else None
+        return f"Bearer {token}" if token else None
 
 
 @dataclass(frozen=True)
@@ -98,3 +110,119 @@ def audit_mcp_tools(tools: Iterable[dict[str, Any]]) -> list[str]:
 def schemathesis_cases(schema: dict[str, Any]) -> list[dict[str, str]]:
     """Return Schemathesis-compatible operation selectors without requiring its extra."""
     return [{"method": item.method, "path": item.path} for item in discover_openapi(schema)]
+
+
+@dataclass(frozen=True)
+class TargetResponse:
+    status_code: int
+    text: str
+    headers: dict[str, str] = field(default_factory=dict)
+    duration_ms: float = 0
+
+    def json(self) -> Any:
+        return json.loads(self.text)
+
+
+class APITarget:
+    """Bounded HTTP target that enforces scope before every request."""
+
+    def __init__(self, base_url: str, *, scope_guard: ScopeGuard,
+                 timeout: float = 20, max_response_bytes: int = 2_000_000,
+                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.scope_guard = scope_guard
+        self.timeout = timeout
+        self.max_response_bytes = max_response_bytes
+        self.transport = transport
+
+    async def request(self, method: str, path: str, *, identity: Identity | None = None,
+                      json_body: Any = None, headers: dict[str, str] | None = None) -> TargetResponse:
+        url = f"{self.base_url}/{path.lstrip('/')}"
+        self.scope_guard.authorize(url)
+        request_headers = dict(headers or {})
+        if identity and identity.authorization():
+            request_headers["Authorization"] = identity.authorization() or ""
+        started = time.perf_counter()
+        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False,
+                                     transport=self.transport) as client:
+            async with client.stream(method, url, json=json_body,
+                                     headers=request_headers) as response:
+                chunks, size = [], 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > self.max_response_bytes:
+                        raise ValueError("target response exceeds configured limit")
+                    chunks.append(chunk)
+        return TargetResponse(response.status_code, b"".join(chunks).decode("utf-8", "replace"),
+                              dict(response.headers), (time.perf_counter() - started) * 1000)
+
+
+async def execute_identity_matrix(target: APITarget, cases: Iterable[IdentityCase]) -> list[tuple[IdentityCase, TargetResponse]]:
+    results = []
+    for case in cases:
+        response = await target.request(case.endpoint.method, case.endpoint.path, identity=case.identity)
+        results.append((case, response))
+    return results
+
+
+Retriever = Callable[[str, str], Any | Awaitable[Any]]
+
+
+@dataclass(frozen=True)
+class RAGDocument:
+    id: str
+    tenant: str
+    text: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class RAGTarget:
+    def __init__(self, retriever: Retriever) -> None:
+        self.retriever = retriever
+
+    async def retrieve(self, query: str, tenant: str) -> list[RAGDocument]:
+        value = self.retriever(query, tenant)
+        raw = await value if inspect.isawaitable(value) else value
+        documents = [item if isinstance(item, RAGDocument) else RAGDocument(**item) for item in raw]
+        return documents
+
+    async def cross_tenant_probe(self, requesting_tenant: str, other_tenant: str) -> bool:
+        probe = RAGProbe(other_tenant)
+        documents = await self.retrieve(probe.canary, requesting_tenant)
+        return any(document.tenant != requesting_tenant or probe.canary in document.text
+                   for document in documents)
+
+
+MCPTransport = Callable[[str, dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]]
+
+
+@dataclass(frozen=True)
+class MCPInventory:
+    server: dict[str, Any]
+    tools: tuple[dict[str, Any], ...]
+    resources: tuple[dict[str, Any], ...]
+    prompts: tuple[dict[str, Any], ...]
+
+
+class MCPClient:
+    """Transport-independent MCP metadata discovery with no tool execution."""
+
+    def __init__(self, transport: MCPTransport) -> None:
+        self.transport = transport
+
+    async def _call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        value = self.transport(method, params or {})
+        result = await value if inspect.isawaitable(value) else value
+        if not isinstance(result, dict):
+            raise ValueError("MCP response must be an object")
+        return result
+
+    async def discover(self) -> MCPInventory:
+        server = await self._call("initialize")
+        tools = (await self._call("tools/list")).get("tools", [])
+        resources = (await self._call("resources/list")).get("resources", [])
+        prompts = (await self._call("prompts/list")).get("prompts", [])
+        for collection in (tools, resources, prompts):
+            if not isinstance(collection, list):
+                raise ValueError("MCP inventory collections must be lists")
+        return MCPInventory(server, tuple(tools), tuple(resources), tuple(prompts))
