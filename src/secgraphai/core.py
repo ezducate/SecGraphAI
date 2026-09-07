@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,6 +39,36 @@ class Evidence(BaseModel):
     deterministic: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    sha256: str | None = None
+
+
+class Interaction(BaseModel):
+    """Sanitized request/response trace captured during a security test."""
+
+    model_config = ConfigDict(frozen=True)
+    test_id: str
+    request: dict[str, Any] = Field(default_factory=dict)
+    response: dict[str, Any] = Field(default_factory=dict)
+    duration_ms: float = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    model_calls: int = Field(default=0, ge=0)
+    tool_calls: int = Field(default=0, ge=0)
+
+
+class ScanManifest(BaseModel):
+    """Inputs required to explain and reproduce a scan."""
+
+    model_config = ConfigDict(frozen=True)
+    schema_version: Literal["1.0"] = "1.0"
+    package_version: str = "1.0.0"
+    target_hash: str | None = None
+    config_hash: str | None = None
+    policy_hash: str | None = None
+    pack_versions: dict[str, str] = Field(default_factory=dict)
+    engine_versions: dict[str, str] = Field(default_factory=dict)
+    seed: int | None = None
+    artifact_hashes: dict[str, str] = Field(default_factory=dict)
 
 
 class Finding(BaseModel):
@@ -55,6 +85,11 @@ class Finding(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     remediation: list[str] = Field(default_factory=list)
     mappings: dict[str, list[str]] = Field(default_factory=dict)
+    cve_ids: list[str] = Field(default_factory=list)
+    cwe_ids: list[str] = Field(default_factory=list)
+    component_ids: list[str] = Field(default_factory=list)
+    known_exploited: bool | None = None
+    fingerprint: str | None = None
 
 
 class Report(BaseModel):
@@ -64,6 +99,10 @@ class Report(BaseModel):
     finished_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     findings: list[Finding] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
+    interactions: list[Interaction] = Field(default_factory=list)
+    manifest: ScanManifest = Field(default_factory=ScanManifest)
+    graph: dict[str, Any] = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
 
     def summary(self) -> dict[str, int]:
         result = {verdict.value: 0 for verdict in Verdict}
