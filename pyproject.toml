@@ -48,8 +48,16 @@ all = [
 ]
 
 [tool.mutmut]
-paths_to_mutate = ["src/secgraphai/policy.py", "src/secgraphai/security.py", "src/secgraphai/runtime.py", "src/secgraphai/reporting.py", "src/secgraphai/plugins.py"]
-tests_dir = ["tests/"]
+source_paths = ["src/"]
+only_mutate = [
+  "src/secgraphai/policy.py",
+  "src/secgraphai/security.py",
+  "src/secgraphai/runtime.py",
+  "src/secgraphai/reporting.py",
+  "src/secgraphai/plugins.py",
+]
+pytest_add_cli_args_test_selection = ["tests/"]
+also_copy = ["demo/"]
 
 [project.scripts]
 secgraph = "secgraphai.cli:app"

@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 build/
 dist/
+mutants/
 .venv/
 secgraph.db*
 

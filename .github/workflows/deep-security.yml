@@ -18,7 +18,8 @@ jobs:
           python-version: '3.13'
       - run: python -m pip install -e '.[test,security]' 'mutmut>=3,<4'
       - run: mutmut run
-      - run: mutmut show
+      - if: always()
+        run: mutmut results
 
   fuzz-and-dynamic:
     runs-on: ubuntu-latest
@@ -28,7 +29,7 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install -e '.[test,api,fuzz]'
-      - run: pytest -q tests/test_prd_properties.py tests/test_prd_scanner_dashboard.py tests/test_prd_benchmark.py
+      - run: python -m pytest -q tests/test_prd_properties.py tests/test_prd_scanner_dashboard.py tests/test_prd_benchmark.py
       - run: python fuzz/fuzz_parsers.py -runs=10000 -max_len=65536
 
   self-dogfood:
