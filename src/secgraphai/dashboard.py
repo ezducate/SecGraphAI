@@ -50,10 +50,14 @@ def create_app(
     max_body_bytes: int = 2_000_000,
     rate_limit: int = 120,
     scan_runner: Callable[[dict[str, Any]], Awaitable[Report]] | None = None,
+    retention_days: int | None = None,
+    encryption_key_env: str | None = None,
+    mask_pii: bool = False,
+    allow_remote: bool = False,
 ):
     if not token or len(token) < 16:
         raise ValueError("dashboard token must contain at least 16 characters")
-    if bind_host not in {"127.0.0.1", "localhost", "::1"}:
+    if bind_host not in {"127.0.0.1", "localhost", "::1"} and not allow_remote:
         raise ValueError("remote dashboard binding requires an external authenticated proxy")
     from fastapi import (
         BackgroundTasks,
@@ -69,7 +73,12 @@ def create_app(
     from fastapi.staticfiles import StaticFiles
 
     app = FastAPI(title="SecGraphAI", docs_url=None, redoc_url=None)
-    storage = Storage(database)
+    storage = Storage(
+        database,
+        retention_days=retention_days,
+        encryption_key_env=encryption_key_env,
+        mask_pii=mask_pii,
+    )
     broker = EventBroker()
     app.state.event_broker = broker
     request_times: dict[str, deque[float]] = defaultdict(deque)
@@ -228,6 +237,102 @@ def create_app(
             for report in storage.list(limit=1000)
             for finding in report.findings
         ]
+
+    @app.get("/api/v1/views/{view}", dependencies=[Depends(authenticate)])
+    def security_view(view: str) -> dict[str, Any]:
+        reports_all = storage.list(limit=1000)
+        findings_all = [item for report in reports_all for item in report.findings]
+        prefixes = {
+            "prompt-injection": ("PI-", "SG-PI-", "SG-PROMPT-"),
+            "agents": ("AGENT-", "SG-AGENT-"),
+            "rag": ("RAG-", "SG-RAG-"),
+            "mcp": ("MCP-", "SG-MCP-"),
+            "api-security": ("API-", "SG-API-"),
+            "identities": ("IDENTITY-", "SG-IDENTITY-", "API-AUTHZ-", "SG-API-AUTHZ-"),
+        }.get(view)
+        if prefixes is not None:
+            selected = [item for item in findings_all if item.id.startswith(prefixes)]
+            by_severity: dict[str, int] = {}
+            by_verdict: dict[str, int] = {}
+            for item in selected:
+                by_severity[item.severity.value] = by_severity.get(item.severity.value, 0) + 1
+                by_verdict[item.verdict.value] = by_verdict.get(item.verdict.value, 0) + 1
+            return {
+                "view": view,
+                "total": len(selected),
+                "by_severity": dict(sorted(by_severity.items())),
+                "by_verdict": dict(sorted(by_verdict.items())),
+                "findings": [item.model_dump(mode="json") for item in selected],
+            }
+        latest_graph = reports_all[0].graph if reports_all else {"nodes": [], "edges": []}
+        if view == "overview":
+            return {
+                "view": view,
+                "scans": len(reports_all),
+                "findings": len(findings_all),
+                "verified": sum(item.verdict == Verdict.VERIFIED_VIOLATION for item in findings_all),
+                "test_errors": sum(item.verdict == Verdict.TEST_ERROR for item in findings_all),
+                "resources": reports_all[0].resources() if reports_all else {},
+            }
+        if view == "targets":
+            return {"view": view, "items": list_targets()}
+        if view == "architecture":
+            return {"view": view, "graph": latest_graph}
+        if view in {"attack-graph", "attack-paths"}:
+            return {"view": view, "items": attack_paths()}
+        if view == "scans":
+            return {"view": view, "items": [item.model_dump(mode="json") for item in reports_all]}
+        if view == "findings":
+            return {"view": view, "items": [item.model_dump(mode="json") for item in findings_all]}
+        if view == "runtime":
+            return {
+                "view": view,
+                "items": [
+                    item.model_dump(mode="json")
+                    for report in reports_all
+                    for item in report.interactions
+                ],
+            }
+        if view == "policies":
+            return {"view": view, "items": list_policies()}
+        if view == "regression-tests":
+            return {
+                "view": view,
+                "items": [
+                    {"finding_id": item.id, "artifacts": regression_bundle(item)}
+                    for item in findings_all
+                ],
+            }
+        if view == "reports":
+            return {"view": view, "items": reports()}
+        if view == "models":
+            nodes = latest_graph.get("nodes", []) if isinstance(latest_graph, dict) else []
+            return {
+                "view": view,
+                "items": [
+                    item
+                    for item in nodes
+                    if isinstance(item, dict) and item.get("kind") == "Model"
+                ],
+            }
+        if view == "vulnerabilities":
+            return {"view": view, "items": vulnerabilities()}
+        if view in {"owasp", "owasp-coverage"}:
+            return {"view": view, "coverage": owasp_coverage()}
+        if view == "settings":
+            return {
+                "view": view,
+                "settings": {
+                    "bind_host": bind_host,
+                    "authentication": "bearer",
+                    "telemetry": False,
+                    "max_body_bytes": max_body_bytes,
+                    "rate_limit_per_minute": rate_limit,
+                },
+            }
+        if view in {"self-audit", "self-security"}:
+            return {"view": view, "audit": self_audit()}
+        raise HTTPException(status_code=404, detail="unknown security view")
 
     @app.get("/api/v1/findings/{finding_id}", dependencies=[Depends(authenticate)])
     def finding(finding_id: str) -> dict[str, Any]:

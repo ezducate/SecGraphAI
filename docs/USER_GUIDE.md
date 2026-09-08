@@ -128,11 +128,14 @@ scope = Scope(
     max_requests_per_second=2,
     max_duration_seconds=120,
     prohibit=frozenset({"destructive_write", "account_deletion"}),
+    require_stable_dns=True,
 )
 guard = ScopeGuard(scope)
 ```
 
-Private, loopback, link-local, and special-purpose networks are blocked by default. The
+Private, loopback, link-local, carrier-grade NAT, benchmark, and special-purpose networks
+are blocked by default. DNS is resolved at authorization time and again immediately before
+connection; a changed address set is rejected when `require_stable_dns` is enabled. The
 CLI's `--allow-private` switch is meant for a local lab that you control; it is not a
 general bypass for production scope review. Redirects are not followed.
 
@@ -156,6 +159,9 @@ agents:
 tools:
   - id: refund-tool
     privileged: true
+    sends_to: [payments-api]
+external_services:
+  - id: payments-api
 vector_stores:
   - id: customer-index
 trust_boundaries:
@@ -169,7 +175,14 @@ otel_spans:
     attributes:
       http.request.method: GET
       http.route: /customers/{customer_id}
+environment:
+  - DATABASE_URL
+  - MODEL_TOKEN
 ```
+
+Relationship keys `calls`, `reads`, `writes`, `sends_to`, and `retrieves_from` become
+typed graph edges when their target is unambiguous. Environment discovery records names
+only and marks values as redacted; it never persists values from the manifest.
 
 Use the public discovery API when you need to combine inventory with custom analysis:
 
@@ -180,6 +193,16 @@ inventory = discover_path("src")
 graph = inventory.to_graph()
 print(inventory.counts())
 print(graph.risk_paths())
+```
+
+For a live FastAPI or Starlette-style application object, route inventory is also available
+without starting the server or executing handlers:
+
+```python
+from secgraphai import discover_fastapi
+from myapp import app
+
+inventory = discover_fastapi(app, source="staging-app")
 ```
 
 Remote discovery fetches only the exact, explicitly supplied OpenAPI URL and enforces a
@@ -516,6 +539,10 @@ scanner = SecGraph(invariants=[no_secret_exfiltration])
 The scanner evaluates matching flows deterministically and attaches flow evidence to the
 finding. An LLM judge can add semantic coverage, but it should not replace an observable
 boundary signal such as an authorization response, tool event, tenant marker, or canary.
+Invariant matching also supports `principal` equality against `$resource.<field>`, an exact
+`tool`, conditional `_gt`, `_gte`, `_lt`, `_lte`, and `_eq` suffixes under `when`, and
+required observed controls. Pass `principal`, `tool`, `context`, and `controls` inside the
+flow metadata to exercise those clauses.
 
 ## Reports, baselines, and regression replay
 
@@ -534,6 +561,16 @@ Create and compare named baselines:
 ```bash
 secgraph baseline create staging-main report.json
 secgraph baseline compare staging-main candidate-report.json
+```
+
+Run the deterministic callback suite against that baseline and fail only for newly
+introduced findings:
+
+```bash
+secgraph test --callback myapp:answer \
+  --baseline staging-main \
+  --fail-on-regression \
+  --output candidate-report.json
 ```
 
 Create a tamper-checked replay archive and validate it without contacting a target:
@@ -604,7 +641,9 @@ secgraph sbom scan bom.json --cache cve-cache.json
 ```
 
 Repeated syncs merge records, preserve source metadata, and resume from the next NVD page
-when a bounded query has more results. A numeric `Retry-After` response is honored with a
+when a bounded query has more results. Once paging completes, later runs send ETag and
+Last-Modified validators and request an NVD last-modified date window, so unchanged data can
+return without reparsing a full feed. A numeric `Retry-After` response is honored with a
 bounded retry. Review `age_seconds` and source validators before relying on an offline result.
 Package-name and version matching may be
 inconclusive; reachability and known-exploited signals are prioritization inputs, not proof
@@ -633,6 +672,39 @@ limits. Container plugins must use an immutable image digest and are started wit
 Docker or Podman flags. SecGraphAI does not make third-party code trusted; review the
 adapter and run it with the minimum permissions.
 
+Native JSON normalization is included for PyRIT, garak, Promptfoo, DeepTeam, Schemathesis,
+LLM Guard, Presidio, Semgrep, CodeQL/SARIF, ZAP, Nuclei, detect-secrets, pip-audit, OSV, and
+ModelScan. Engines still execute through an explicitly permissioned plugin manifest; listing
+an engine does not install it or grant it target access.
+
+## Evidence privacy, retention, and encrypted storage
+
+Redaction covers authorization, proxy authorization, API keys, tokens, passwords, secrets,
+cookies, Set-Cookie, and session fields. Optional PII masking replaces common email and phone
+values in reports:
+
+```bash
+secgraph scan --callback myapp:answer --format json --mask-pii
+secgraph report render report.json report.html --mask-pii
+```
+
+SQLite can encrypt every stored report, finding, evidence item, interaction, graph element,
+and dashboard document with a Fernet key held only in an environment variable. It can also
+prune expired evidence at startup:
+
+```powershell
+pip install "secgraphai[dashboard,security]"
+$env:SECGRAPH_STORAGE_KEY = "<url-safe Fernet key>"
+secgraph serve --database secgraph.db `
+  --encryption-key-env SECGRAPH_STORAGE_KEY `
+  --retention-days 30 `
+  --mask-pii
+```
+
+The key is never written to SQLite. Back it up separately: opening encrypted records without
+the same key fails closed. The Python API exposes the same controls through
+`Storage(..., encryption_key_env=..., retention_days=..., mask_pii=True)`.
+
 ## Local dashboard and API
 
 Install the dashboard extra, choose a strong token of at least 16 characters, and bind to
@@ -646,8 +718,15 @@ secgraph serve --host 127.0.0.1 --port 8777 --database secgraph.db
 
 Open `http://127.0.0.1:8777/`. Every data API requires
 `Authorization: Bearer <token>`. The server disables interactive API docs, applies body
-and request-rate limits, adds defensive browser headers, and rejects non-loopback binding
-unless an external authenticated proxy is used.
+and request-rate limits, and adds defensive browser headers. Loopback is the default. An
+explicit non-loopback `--host` is accepted only with the required strong bearer token and
+prints a TLS-termination warning; put it behind a trusted TLS proxy before exposing it.
+
+Every frontend area has a dedicated shaped endpoint under `/api/v1/views/{name}`, including
+overview, architecture, attack paths, prompt injection, agents, RAG, MCP, API security,
+identities, runtime events, regression artifacts, models, vulnerabilities, OWASP coverage,
+settings, and self-security. This prevents security-specific pages from silently showing an
+unfiltered copy of the general findings feed.
 
 Register an OpenAI-compatible target and queue an adaptive scan:
 
@@ -675,7 +754,7 @@ behaviors: object authorization, approval gates, indirect prompt injection, RAG 
 external data flow, and runaway agent recursion.
 
 ```bash
-python -m pytest tests/test_demo_assessment.py -q
+python -m pytest tests/test_prd_benchmark.py -q
 ```
 
 `demo.assessment.assess_demo` runs both variants through the public API, RAG, and agent
@@ -706,11 +785,11 @@ a remediation removes a finding without breaking the test harness.
 SecGraphAI 1.0.0rc1 provides the executable core described in the PRD, but some activities
 remain release or integration responsibilities:
 
-- framework-specific live inventory beyond built-in Python/OpenAPI/manifest/OpenTelemetry
-  and supplied MCP transport discovery needs an adapter;
+- framework-specific live inventory beyond built-in FastAPI-style route, static Python,
+  OpenAPI, manifest, OpenTelemetry, and supplied MCP transport discovery needs an adapter;
 - external scanners use the normalized plugin/adapter contract and still require their own
   installation, configuration, licenses, and trust review;
-- NVD synchronization resumes and merges bounded query pages into a durable cache;
+- NVD synchronization supports paging, conditional requests, and modified-date deltas;
   operators remain responsible for scheduling queries and deciding cache-freshness policy;
 - probabilistic model judgments require human review for consequential decisions;
 - an independent pre-1.0 security review, release signing, and publishing are maintainer

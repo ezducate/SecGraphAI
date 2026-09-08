@@ -14,6 +14,12 @@ Versioning and the format is based on Keep a Changelog.
 - Added MCP and OpenTelemetry architecture discovery with graph relationships and public APIs.
 - Added a detailed user guide with callback, model, API, RAG, MCP, agent, CI, and dashboard scenarios.
 - Expanded security and integration coverage to more than 450 tests.
+- Completed principal/tool/condition/control invariant evaluation and full resource accounting.
+- Expanded RAG, MCP, API, and agent checks and normalized every declared external-engine format.
+- Added live FastAPI route discovery, declared graph relationships, and environment-name-only metadata.
+- Added conditional/delta NVD synchronization, encrypted/retained storage, optional PII masking,
+  broader credential redaction, DNS rebinding detection, and replay compression-ratio limits.
+- Added baseline-aware `secgraph test`, historical policy simulation, and dedicated dashboard views.
 
 ## [1.0.0rc1] - 2026-09-07
 

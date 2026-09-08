@@ -21,6 +21,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from secgraphai.core import Finding
+from secgraphai.security import validate_document
 
 
 @dataclass(frozen=True)
@@ -516,22 +517,46 @@ class NVDClient:
         )
         self.response_metadata: dict[str, object] = {}
 
-    async def search(self, query: str, *, start_index: int = 0) -> list[Vulnerability]:
+    async def search(
+        self,
+        query: str,
+        *,
+        start_index: int = 0,
+        etag: str | None = None,
+        last_modified: str | None = None,
+        last_mod_start_date: str | None = None,
+        last_mod_end_date: str | None = None,
+    ) -> list[Vulnerability]:
         if start_index < 0:
             raise ValueError("NVD start index cannot be negative")
-        headers = (
+        headers: dict[str, str] = (
             {"apiKey": os.environ[self.api_key_env]} if os.environ.get(self.api_key_env) else {}
         )
+        if etag:
+            headers["If-None-Match"] = etag
+        if last_modified:
+            headers["If-Modified-Since"] = last_modified
+        parameters: dict[str, str | int] = {
+            "keywordSearch": query,
+            "resultsPerPage": 2000,
+            "startIndex": start_index,
+        }
+        if bool(last_mod_start_date) != bool(last_mod_end_date):
+            raise ValueError("NVD delta synchronization requires both start and end dates")
+        if last_mod_start_date and last_mod_end_date:
+            parameters.update(
+                {
+                    "lastModStartDate": last_mod_start_date,
+                    "lastModEndDate": last_mod_end_date,
+                }
+            )
+        chunks: list[bytes] = []
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
             for attempt in range(2):
                 async with client.stream(
                     "GET",
                     self.endpoint,
-                    params={
-                        "keywordSearch": query,
-                        "resultsPerPage": 2000,
-                        "startIndex": start_index,
-                    },
+                    params=parameters,
                     headers=headers,
                 ) as response:
                     self.response_metadata = {
@@ -543,6 +568,21 @@ class NVDClient:
                         }.items()
                         if value
                     }
+                    if response.status_code == 304:
+                        self.response_metadata.update(
+                            {
+                                "etag": response.headers.get("etag") or etag,
+                                "last_modified": response.headers.get("last-modified")
+                                or last_modified,
+                                "query": query,
+                                "start_index": start_index,
+                                "next_start_index": None,
+                                "complete": True,
+                                "not_modified": True,
+                                "mode": "conditional",
+                            }
+                        )
+                        return []
                     retry_after = response.headers.get("retry-after")
                     if response.status_code == 429 and attempt == 0 and retry_after:
                         try:
@@ -553,7 +593,6 @@ class NVDClient:
                             await asyncio.sleep(delay)
                             continue
                     response.raise_for_status()
-                    chunks: list[bytes] = []
                     size = 0
                     async for chunk in response.aiter_bytes():
                         size += len(chunk)
@@ -567,6 +606,7 @@ class NVDClient:
             raise ValueError("NVD response is invalid JSON") from exc
         if not isinstance(document, dict):
             raise ValueError("NVD response must be an object")
+        validate_document(document)
         values = parse_nvd(document)
         total_results = document.get("totalResults")
         if not isinstance(total_results, int) or total_results < 0:
@@ -583,6 +623,7 @@ class NVDClient:
                 "results_per_page": page_size,
                 "next_start_index": next_index if next_index < total_results else None,
                 "complete": next_index >= total_results,
+                "mode": "delta" if last_mod_start_date else "full",
             }
         )
         return values

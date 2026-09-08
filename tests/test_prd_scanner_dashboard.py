@@ -32,6 +32,9 @@ async def test_scanner_connects_validators_invariants_traces_and_manifest():
             "safe",
             tools=("shell",),
             cost_usd=0.25,
+            retries=1,
+            retrieval_calls=2,
+            external_calls=3,
             metadata={
                 "flow": {"source": {"trust": "untrusted"}, "destination": {"trust": "external"}}
             },
@@ -40,6 +43,10 @@ async def test_scanner_connects_validators_invariants_traces_and_manifest():
     report = await scanner.scan(callback, prompts=["probe"])
     assert len(report.findings) == 3
     assert report.interactions[0].tool_calls == 1
+    assert report.resources()["cost_usd"] == 0.25
+    assert report.resources()["retries"] == 1
+    assert report.resources()["retrieval_calls"] == 2
+    assert report.resources()["external_calls"] == 3
     assert report.manifest.seed == 42 and report.manifest.target_hash
 
 
@@ -143,6 +150,13 @@ def test_dashboard_rejects_weak_token_and_remote_bind(tmp_path):
         create_app(database=tmp_path / "x", token="short")
     with pytest.raises(ValueError):
         create_app(database=tmp_path / "x", token="a-strong-token-value", bind_host="0.0.0.0")
+    remote = create_app(
+        database=tmp_path / "remote",
+        token="a-strong-token-value",
+        bind_host="0.0.0.0",
+        allow_remote=True,
+    )
+    assert remote is not None
 
 
 def test_dashboard_background_scan_jobs_and_live_events(tmp_path):

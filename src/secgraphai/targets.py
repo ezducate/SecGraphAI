@@ -16,7 +16,7 @@ import httpx
 
 from secgraphai.canary import CanaryFactory
 from secgraphai.config import Mode
-from secgraphai.security import ScopeGuard
+from secgraphai.security import ScopeGuard, validate_document
 
 
 @dataclass(frozen=True)
@@ -143,9 +143,15 @@ class TargetResponse:
     text: str
     headers: dict[str, str] = field(default_factory=dict)
     duration_ms: float = 0
+    max_json_depth: int = 64
 
     def json(self) -> Any:
-        return json.loads(self.text)
+        try:
+            value = json.loads(self.text)
+        except RecursionError as exc:
+            raise ValueError("target JSON exceeds nesting limit") from exc
+        validate_document(value, max_depth=self.max_json_depth)
+        return value
 
 
 class APITarget:
@@ -211,6 +217,9 @@ class APITarget:
         async with httpx.AsyncClient(
             timeout=self.timeout, follow_redirects=False, transport=self.transport
         ) as client:
+            revalidate = getattr(self.scope_guard, "revalidate", None)
+            if callable(revalidate):
+                revalidate(url)
             async with client.stream(
                 normalized_method, url, json=json_body, headers=request_headers
             ) as response:
@@ -259,16 +268,26 @@ class RAGTarget:
         writer: Callable[[RAGDocument], Any | Awaitable[Any]] | None = None,
         deleter: Callable[[str, str], Any | Awaitable[Any]] | None = None,
         configuration: dict[str, Any] | None = None,
+        max_documents: int = 1_000,
+        max_document_chars: int = 1_000_000,
     ) -> None:
         self.retriever = retriever
         self.writer = writer
         self.deleter = deleter
         self.configuration = dict(configuration or {})
+        self.max_documents = max_documents
+        self.max_document_chars = max_document_chars
 
     async def retrieve(self, query: str, tenant: str) -> list[RAGDocument]:
         value = self.retriever(query, tenant)
         raw = await value if inspect.isawaitable(value) else value
+        if not isinstance(raw, (list, tuple)):
+            raise ValueError("RAG retrieval response must be a list")
+        if len(raw) > self.max_documents:
+            raise ValueError("RAG retrieval response exceeds document limit")
         documents = [item if isinstance(item, RAGDocument) else RAGDocument(**item) for item in raw]
+        if any(len(item.text) > self.max_document_chars for item in documents):
+            raise ValueError("RAG document exceeds configured character limit")
         return documents
 
     async def cross_tenant_probe(self, requesting_tenant: str, other_tenant: str) -> bool:
@@ -333,6 +352,7 @@ class MCPClient:
             raise ValueError("MCP response must be an object")
         if len(json.dumps(result, default=str).encode()) > self.max_response_bytes:
             raise ValueError("MCP response exceeds configured limit")
+        validate_document(result, max_depth=64)
         return result
 
     async def discover(self) -> MCPInventory:
@@ -341,6 +361,8 @@ class MCPClient:
         resources = (await self._call("resources/list")).get("resources", [])
         prompts = (await self._call("prompts/list")).get("prompts", [])
         for collection in (tools, resources, prompts):
-            if not isinstance(collection, list):
-                raise ValueError("MCP inventory collections must be lists")
+            if not isinstance(collection, list) or not all(
+                isinstance(item, dict) for item in collection
+            ):
+                raise ValueError("MCP inventory collections must be lists of objects")
         return MCPInventory(server, tuple(tools), tuple(resources), tuple(prompts))

@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import builtins
 import json
+import os
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from platformdirs import user_data_path
 
 from secgraphai.core import Report
-from secgraphai.reporting import to_json
 from secgraphai.security import redact
 
 SCHEMA_VERSION = 1
@@ -22,11 +22,36 @@ DOCUMENT_TABLES = frozenset(
 
 
 class Storage:
-    def __init__(self, path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        retention_days: int | None = None,
+        encryption_key_env: str | None = None,
+        mask_pii: bool = False,
+    ) -> None:
+        if retention_days is not None and retention_days < 1:
+            raise ValueError("retention_days must be positive")
         default = user_data_path("secgraphai") / "secgraph.db"
         self.path = Path(path) if path else default
+        self._fernet: Any | None = None
+        self.mask_pii = mask_pii
+        if encryption_key_env:
+            key = os.environ.get(encryption_key_env)
+            if not key:
+                raise ValueError(f"storage encryption key environment variable is unset: {encryption_key_env}")
+            try:
+                from cryptography.fernet import Fernet
+            except ImportError as exc:  # pragma: no cover - exercised without the security extra
+                raise RuntimeError("encrypted storage requires the security extra") from exc
+            try:
+                self._fernet = Fernet(key.encode())
+            except (TypeError, ValueError) as exc:
+                raise ValueError("storage encryption key is not a valid Fernet key") from exc
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._initialize()
+        if retention_days is not None:
+            self.prune(before=datetime.now(UTC) - timedelta(days=retention_days))
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path)
@@ -79,7 +104,7 @@ class Storage:
 
     def save(self, report: Report) -> None:
         created_at = report.finished_at.isoformat()
-        document = to_json(report)
+        document = self._encode(report.model_dump(mode="json"))
         with self._connect() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO reports VALUES (?, ?, ?)",
@@ -95,7 +120,7 @@ class Storage:
                     (report.scan_id,),
                 )
             for finding in report.findings:
-                finding_document = _json(finding.model_dump(mode="json"))
+                finding_document = self._encode(finding.model_dump(mode="json"))
                 connection.execute(
                     "INSERT INTO findings VALUES (?, ?, ?)",
                     (report.scan_id, finding.id, finding_document),
@@ -103,28 +128,32 @@ class Storage:
                 for evidence in finding.evidence:
                     connection.execute(
                         "INSERT INTO evidence (scan_id, finding_id, document) VALUES (?, ?, ?)",
-                        (report.scan_id, finding.id, _json(evidence.model_dump(mode="json"))),
+                        (
+                            report.scan_id,
+                            finding.id,
+                            self._encode(evidence.model_dump(mode="json")),
+                        ),
                     )
             for interaction in report.interactions:
                 connection.execute(
                     "INSERT INTO events (scan_id, document) VALUES (?, ?)",
-                    (report.scan_id, _json(interaction.model_dump(mode="json"))),
+                    (report.scan_id, self._encode(interaction.model_dump(mode="json"))),
                 )
             graph = report.graph if isinstance(report.graph, dict) else {}
             for node in graph.get("nodes", []):
                 connection.execute(
                     "INSERT INTO graph_nodes (scan_id, document) VALUES (?, ?)",
-                    (report.scan_id, _json(node)),
+                    (report.scan_id, self._encode(node)),
                 )
             for edge in graph.get("edges") or graph.get("links") or []:
                 connection.execute(
                     "INSERT INTO graph_edges (scan_id, document) VALUES (?, ?)",
-                    (report.scan_id, _json(edge)),
+                    (report.scan_id, self._encode(edge)),
                 )
             for path in graph.get("risk_paths", []):
                 connection.execute(
                     "INSERT INTO attack_paths (scan_id, document) VALUES (?, ?)",
-                    (report.scan_id, _json(path)),
+                    (report.scan_id, self._encode(path)),
                 )
 
     def get(self, scan_id: str) -> Report | None:
@@ -132,7 +161,7 @@ class Storage:
             row = connection.execute(
                 "SELECT document FROM reports WHERE scan_id = ?", (scan_id,)
             ).fetchone()
-        return Report.model_validate_json(row[0]) if row else None
+        return Report.model_validate(self._decode(str(row[0]))) if row else None
 
     def list(self, *, limit: int = 100, offset: int = 0) -> list[Report]:
         if not 1 <= limit <= 1000 or offset < 0:
@@ -142,7 +171,7 @@ class Storage:
                 "SELECT document FROM reports ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             ).fetchall()
-        return [Report.model_validate_json(row[0]) for row in rows]
+        return [Report.model_validate(self._decode(str(row[0]))) for row in rows]
 
     def finding(self, finding_id: str):
         for report in self.list(limit=1000):
@@ -159,7 +188,7 @@ class Storage:
         with self._connect() as connection:
             connection.execute(
                 f"INSERT OR REPLACE INTO {table} VALUES (?, ?, ?)",  # noqa: S608
-                (identifier, datetime.now(UTC).isoformat(), _json(document)),
+                (identifier, datetime.now(UTC).isoformat(), self._encode(document)),
             )
 
     def list_documents(self, table: str, *, limit: int = 100) -> builtins.list[dict[str, Any]]:
@@ -172,7 +201,7 @@ class Storage:
                 f"SELECT document FROM {table} ORDER BY created_at DESC LIMIT ?",  # nosec B608  # noqa: S608
                 (limit,),
             ).fetchall()
-        return [json.loads(str(row["document"])) for row in rows]
+        return [self._decode(str(row["document"])) for row in rows]
 
     def get_document(self, table: str, identifier: str) -> dict[str, Any] | None:
         if table not in DOCUMENT_TABLES:
@@ -182,7 +211,7 @@ class Storage:
                 f"SELECT document FROM {table} WHERE id = ?",  # nosec B608  # noqa: S608
                 (identifier,),
             ).fetchone()
-        return json.loads(str(row["document"])) if row else None
+        return self._decode(str(row["document"])) if row else None
 
     def attack_paths(self, scan_id: str | None = None) -> builtins.list[dict[str, Any]]:
         query = "SELECT document FROM attack_paths"
@@ -192,8 +221,40 @@ class Storage:
             parameters = (scan_id,)
         with self._connect() as connection:
             rows = connection.execute(query, parameters).fetchall()
-        return [json.loads(str(row["document"])) for row in rows]
+        return [self._decode(str(row["document"])) for row in rows]
 
+    def prune(self, *, before: datetime) -> dict[str, int]:
+        """Delete scan artifacts and generic documents older than the supplied cutoff."""
+        if before.tzinfo is None:
+            raise ValueError("retention cutoff must be timezone-aware")
+        cutoff = before.astimezone(UTC).isoformat()
+        with self._connect() as connection:
+            scans = connection.execute(
+                "DELETE FROM scans WHERE created_at < ?", (cutoff,)
+            ).rowcount
+            reports = connection.execute(
+                "DELETE FROM reports WHERE created_at < ?", (cutoff,)
+            ).rowcount
+            documents = 0
+            for table in DOCUMENT_TABLES:
+                documents += connection.execute(
+                    f"DELETE FROM {table} WHERE created_at < ?",  # noqa: S608  # nosec B608
+                    (cutoff,),
+                ).rowcount
+        return {"scans": scans, "reports": reports, "documents": documents}
 
-def _json(value: Any) -> str:
-    return json.dumps(redact(value), sort_keys=True, default=str)
+    def _encode(self, value: Any) -> str:
+        document = json.dumps(redact(value, mask_pii=self.mask_pii), sort_keys=True, default=str)
+        if self._fernet is None:
+            return document
+        return "enc:v1:" + self._fernet.encrypt(document.encode()).decode()
+
+    def _decode(self, document: str) -> Any:
+        if document.startswith("enc:v1:"):
+            if self._fernet is None:
+                raise ValueError("encrypted storage requires its configured key")
+            try:
+                document = self._fernet.decrypt(document.removeprefix("enc:v1:").encode()).decode()
+            except Exception as exc:
+                raise ValueError("stored document could not be decrypted") from exc
+        return json.loads(document)

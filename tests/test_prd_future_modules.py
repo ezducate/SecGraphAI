@@ -7,7 +7,13 @@ from typer.testing import CliRunner
 
 from secgraphai.cli import app
 from secgraphai.core import Finding, Interaction, Report, Severity, Verdict
-from secgraphai.evaluation import UtilityResult, compare_utility, measure
+from secgraphai.evaluation import (
+    ResourceUsage,
+    UtilityResult,
+    compare_utility,
+    detect_amplification,
+    measure,
+)
 from secgraphai.multimodal import inspect_media
 from secgraphai.research import draft_attack_pack, extract_text
 from secgraphai.supply_chain import inspect_artifact, inspect_model_directory
@@ -33,6 +39,14 @@ def test_resource_and_utility_differential():
     result = compare_utility(UtilityResult(1, 1, 5, 0), value)
     assert value.attack_success_rate == 1 and value.legitimate_success_rate == 0.9
     assert result.utility_delta < 0 and result.latency_delta_ms == 5
+    alerts = detect_amplification(
+        ResourceUsage(model_calls=1, retries=1),
+        ResourceUsage(model_calls=5, retries=2),
+    )
+    assert [item.metric for item in alerts] == ["model_calls"]
+    assert detect_amplification(ResourceUsage(), ResourceUsage()) == []
+    with pytest.raises(ValueError, match="thresholds"):
+        detect_amplification(ResourceUsage(), ResourceUsage(), max_ratio=1)
 
 
 def test_research_importer_is_disabled_draft(tmp_path):

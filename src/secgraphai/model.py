@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from secgraphai.security import ScopeGuard
+from secgraphai.security import ScopeGuard, validate_document
 
 
 class ModelError(RuntimeError):
@@ -48,6 +48,9 @@ class Model:
             self.scope_guard.authorize(endpoint)
         try:
             async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
+                revalidate = getattr(self.scope_guard, "revalidate", None)
+                if callable(revalidate):
+                    revalidate(endpoint)
                 async with client.stream(
                     "POST", endpoint, json=payload, headers=headers
                 ) as response:
@@ -64,6 +67,7 @@ class Model:
             raise ModelError(f"model request failed: {type(exc).__name__}") from exc
         try:
             parsed = httpx.Response(200, content=data).json()
+            validate_document(parsed)
             return str(parsed["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise ModelError("invalid OpenAI-compatible response") from exc

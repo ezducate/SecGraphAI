@@ -181,3 +181,5 @@ def test_replay_rejects_incomplete_manifest(tmp_path):
             archive.writestr(name, value)
     with pytest.raises(ValueError, match="manifest"):
         load_replay(modified)
+    with pytest.raises(ValueError, match="unsafe replay archive"):
+        load_replay(original, max_compression_ratio=0.01)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 
 import pytest
@@ -58,6 +59,23 @@ def test_adapter_skips_non_objects_and_plugin_hash_requirements(monkeypatch, tmp
         "secgraphai.adapters.run_plugin", lambda *args, **kwargs: {"findings": ["bad", {"id": "x"}]}
     )
     assert len(Adapter("garak", PluginManifest("x", ("python",))).run({})) == 1
+    monkeypatch.setattr(
+        "secgraphai.adapters.run_plugin",
+        lambda *args, **kwargs: {
+            "findings": [
+                {
+                    "id": "x",
+                    "severity": "invented",
+                    "verdict": "invented",
+                    "confidence": 9,
+                    "mappings": "invalid",
+                }
+            ]
+        },
+    )
+    hostile = Adapter("garak", PluginManifest("x", ("python",))).run({})[0]
+    assert hostile.severity is Severity.MEDIUM
+    assert hostile.verdict is Verdict.INCONCLUSIVE and hostile.confidence == 1
     trusted = PluginManifest("trusted", ("python",), trust=PluginTrust.TRUSTED)
     assert any("SHA-256" in item for item in audit_plugins([trusted]))
     executable = tmp_path / "engine"
@@ -238,7 +256,40 @@ async def test_nvd_client_records_resumable_page_metadata():
         "results_per_page": 1,
         "next_start_index": 2001,
         "complete": False,
+        "mode": "full",
     }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_nvd_client_supports_conditional_and_delta_sync():
+    route = respx.get(NVDClient.endpoint)
+    route.mock(return_value=Response(304, headers={"ETag": '"fresh"'}))
+    client = NVDClient()
+    assert (
+        await client.search(
+            "python",
+            etag='"old"',
+            last_modified="Sun, 06 Sep 2026 00:00:00 GMT",
+            last_mod_start_date="2026-09-06T00:00:00+00:00",
+            last_mod_end_date="2026-09-07T00:00:00+00:00",
+        )
+        == []
+    )
+    request = route.calls[0].request
+    assert request.headers["if-none-match"] == '"old"'
+    assert request.headers["if-modified-since"] == "Sun, 06 Sep 2026 00:00:00 GMT"
+    assert "lastModStartDate" in request.url.params
+    assert client.response_metadata["not_modified"] is True
+    route.mock(return_value=Response(200, json={"vulnerabilities": [], "totalResults": 0}))
+    await client.search(
+        "python",
+        last_mod_start_date="2026-09-06T00:00:00+00:00",
+        last_mod_end_date="2026-09-07T00:00:00+00:00",
+    )
+    assert client.response_metadata["mode"] == "delta"
+    with pytest.raises(ValueError, match="both start and end"):
+        await client.search("python", last_mod_start_date="2026-09-06")
 
 
 @pytest.mark.asyncio
@@ -268,7 +319,7 @@ def test_dashboard_persistence_cve_owasp_limits_and_policy(tmp_path):
         == 200
     )
     finding = Finding(
-        id="F",
+        id="SG-RAG-F",
         title="issue",
         severity=Severity.HIGH,
         verdict=Verdict.TEST_ERROR,
@@ -286,6 +337,33 @@ def test_dashboard_persistence_cve_owasp_limits_and_policy(tmp_path):
     assert client.get("/api/v1/vulnerabilities", headers=headers).json()[0]["id"].startswith("CVE")
     matrix = client.get("/api/v1/owasp-coverage", headers=headers).json()
     assert matrix["states"]["LLM01"] == "TEST_ERROR"
+    rag_view = client.get("/api/v1/views/rag", headers=headers).json()
+    assert rag_view["total"] == 1 and rag_view["by_verdict"] == {"TEST_ERROR": 1}
+    for view in (
+        "overview",
+        "targets",
+        "architecture",
+        "attack-graph",
+        "scans",
+        "findings",
+        "prompt-injection",
+        "agents",
+        "mcp",
+        "api-security",
+        "identities",
+        "runtime",
+        "policies",
+        "regression-tests",
+        "reports",
+        "models",
+        "vulnerabilities",
+        "owasp-coverage",
+        "settings",
+        "self-security",
+    ):
+        response = client.get(f"/api/v1/views/{view}", headers=headers)
+        assert response.status_code == 200, view
+    assert client.get("/api/v1/views/unknown", headers=headers).status_code == 404
     recreated = TestClient(create_app(database=database, token=token, rate_limit=1000))
     assert recreated.get("/api/v1/targets", headers=headers).json()[0]["id"] == "t"
     assert client.post("/api/v1/policies", headers=headers, json={}).status_code == 422
@@ -314,3 +392,18 @@ def test_official_pack_name_and_empty_cache_branches(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_official_pack("missing")
     assert VulnerabilityCache(tmp_path / "missing.json").search("x") == []
+
+
+@pytest.mark.asyncio
+async def test_target_json_and_rag_results_enforce_structural_bounds():
+    nested: object = "leaf"
+    for _ in range(70):
+        nested = {"next": nested}
+    response = TargetResponse(200, json.dumps(nested), max_json_depth=32)
+    with pytest.raises(ValueError, match="nesting"):
+        response.json()
+
+    target = RAGTarget(lambda query, tenant: [{"id": "x", "tenant": tenant, "text": "long"}])
+    target.max_document_chars = 2
+    with pytest.raises(ValueError, match="character limit"):
+        await target.retrieve("q", "a")

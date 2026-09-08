@@ -24,13 +24,20 @@ class ScopeConfig(BaseModel):
     max_requests_per_second: float = Field(default=5, gt=0, le=10_000)
     max_duration_seconds: float = Field(default=120, gt=0, le=86_400)
     prohibit: list[str] = Field(default_factory=lambda: ["destructive_write", "account_deletion"])
+    require_stable_dns: bool = True
     blocked_networks: list[str] = Field(
         default_factory=lambda: [
             "0.0.0.0/8",
+            "10.0.0.0/8",
+            "100.64.0.0/10",
             "127.0.0.0/8",
             "169.254.0.0/16",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "198.18.0.0/15",
             "224.0.0.0/4",
             "::1/128",
+            "fc00::/7",
             "fe80::/10",
         ]
     )
@@ -60,6 +67,22 @@ class ActorConfig(BaseModel):
         return value
 
 
+class PrivacyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    telemetry: bool = False
+    cloud_upload: bool = False
+    evidence_retention_days: int | None = Field(default=None, ge=1)
+    encryption_key_env: str | None = None
+    mask_pii: bool = False
+
+    @field_validator("encryption_key_env")
+    @classmethod
+    def encryption_key_is_reference(cls, value: str | None) -> str | None:
+        if value is not None and not value.replace("_", "").isalnum():
+            raise ValueError("encryption_key_env must be an environment variable name")
+        return value
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Mode = Mode.SAFE
@@ -70,6 +93,7 @@ class Config(BaseModel):
     actors: dict[str, ActorConfig] = Field(default_factory=dict)
     policies: list[dict[str, object]] = Field(default_factory=list)
     attack_packs: list[str] = Field(default_factory=list)
+    privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     seed: int = 0
 
     @classmethod

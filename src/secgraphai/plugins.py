@@ -18,6 +18,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from secgraphai.security import validate_document
+
 
 class PluginMode(StrEnum):
     IN_PROCESS = "in_process"
@@ -97,9 +99,13 @@ def run_plugin(
         )  # nosec B603
     if result.returncode or len(result.stdout.encode()) > manifest.max_output_bytes:
         raise RuntimeError("plugin failed or exceeded output limit")
-    value = json.loads(result.stdout)
+    try:
+        value = json.loads(result.stdout)
+    except (json.JSONDecodeError, RecursionError) as exc:
+        raise ValueError("plugin output must be valid bounded JSON") from exc
     if not isinstance(value, dict):
         raise ValueError("plugin output must be a JSON object")
+    validate_document(value)
     if manifest.output_schema:
         required = manifest.output_schema.get("required", [])
         if not all(key in value for key in required):

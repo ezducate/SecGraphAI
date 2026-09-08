@@ -52,6 +52,20 @@ def test_scope_guard_rejects_all_dangerous_branches(monkeypatch):
         duration.authorize("https://example.test")
 
 
+def test_scope_guard_detects_dns_rebinding_before_connection(monkeypatch):
+    responses = iter(
+        [
+            [(None, None, None, None, ("8.8.8.8", 443))],
+            [(None, None, None, None, ("9.9.9.9", 443))],
+        ]
+    )
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: next(responses))
+    scoped = guard()
+    scoped.authorize("https://example.test")
+    with pytest.raises(PermissionError, match="DNS resolution changed"):
+        scoped.revalidate("https://example.test")
+
+
 def test_doctor_all_extended_findings():
     problems = doctor(
         {

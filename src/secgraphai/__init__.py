@@ -24,9 +24,19 @@ from secgraphai.core import (
 from secgraphai.discovery import (
     DiscoveredComponent,
     DiscoveryInventory,
+    discover_fastapi,
     discover_mcp,
     discover_path,
     discover_url,
+)
+from secgraphai.evaluation import (
+    DifferentialResult,
+    ResourceAmplification,
+    ResourceUsage,
+    UtilityResult,
+    compare_utility,
+    detect_amplification,
+    measure,
 )
 from secgraphai.graph import EdgeType, NodeType, SecurityGraph
 from secgraphai.invariants import Invariant, InvariantEngine, invariant
@@ -49,6 +59,7 @@ __all__ = [
     "Confidence",
     "DiscoveredComponent",
     "DiscoveryInventory",
+    "DifferentialResult",
     "EdgeType",
     "Evidence",
     "Finding",
@@ -62,6 +73,8 @@ __all__ = [
     "ModelRoles",
     "NodeType",
     "Report",
+    "ResourceAmplification",
+    "ResourceUsage",
     "SecGraph",
     "SecurityGraph",
     "Sensitive",
@@ -72,13 +85,18 @@ __all__ = [
     "Rule",
     "ScanManifest",
     "Tainted",
+    "UtilityResult",
     "Verdict",
     "Verification",
     "canary",
+    "compare_utility",
+    "detect_amplification",
     "discover_mcp",
+    "discover_fastapi",
     "discover_path",
     "discover_url",
     "invariant",
     "load_official_pack",
+    "measure",
     "secgraph",
 ]

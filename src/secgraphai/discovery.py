@@ -54,6 +54,7 @@ class DiscoveryInventory:
             "vector_store": NodeType.VECTOR_STORE,
             "external_service": NodeType.EXTERNAL_SERVICE,
             "trust_boundary": NodeType.NETWORK_BOUNDARY,
+            "configuration": NodeType.COMPONENT,
         }
         for item in self.components:
             kind = kind_map.get(item.kind)
@@ -73,6 +74,31 @@ class DiscoveryInventory:
             if isinstance(server_id, str) and server_id in node_ids and item.id in node_ids:
                 edge = EdgeType.CAN_READ if item.kind == "mcp_resource" else EdgeType.CAN_CALL
                 graph.add_edge(server_id, item.id, edge)
+        aliases: dict[str, set[str]] = {}
+        for item in self.components:
+            for alias in (item.id, item.id.rsplit(":", 1)[-1], item.metadata.get("name")):
+                if isinstance(alias, str):
+                    aliases.setdefault(alias, set()).add(item.id)
+        relationships = {
+            "calls": EdgeType.CAN_CALL,
+            "reads": EdgeType.CAN_READ,
+            "writes": EdgeType.CAN_WRITE,
+            "sends_to": EdgeType.SENDS_TO,
+            "retrieves_from": EdgeType.RETRIEVES_FROM,
+        }
+        for item in self.components:
+            if item.id not in node_ids:
+                continue
+            for key, edge_kind in relationships.items():
+                values = item.metadata.get(key, [])
+                if isinstance(values, str):
+                    values = [values]
+                if not isinstance(values, list):
+                    continue
+                for reference in values:
+                    matches = aliases.get(str(reference), set()) & node_ids
+                    if len(matches) == 1:
+                        graph.add_edge(item.id, next(iter(matches)), edge_kind)
         return graph
 
 
@@ -107,9 +133,11 @@ def _discover_python(path: Path, inventory: DiscoveryInventory) -> None:
                 expression = decorator.func if isinstance(decorator, ast.Call) else decorator
                 kind = _call_name(expression).casefold()
                 if kind in {"agent", "tool", "retriever"}:
+                    metadata = {"function": node.name}
+                    metadata.update(_decorator_metadata(decorator))
                     inventory.add(
                         DiscoveredComponent(
-                            f"python:{path}:{node.name}", kind, str(path), {"function": node.name}
+                            f"python:{path}:{node.name}", kind, str(path), metadata
                         )
                     )
                 elif kind in HTTP_METHODS:
@@ -187,6 +215,7 @@ def _discover_manifest(path: Path, inventory: DiscoveryInventory) -> None:
         "vector_stores": "vector_store",
         "external_services": "external_service",
         "trust_boundaries": "trust_boundary",
+        "environment": "configuration",
     }.items():
         values = raw.get(key, [])
         if isinstance(values, dict):
@@ -196,7 +225,15 @@ def _discover_manifest(path: Path, inventory: DiscoveryInventory) -> None:
             ]
         if isinstance(values, list):
             for index, value in enumerate(values):
-                metadata = value if isinstance(value, dict) else {"value": value}
+                if key == "environment":
+                    name = (
+                        value.get("name") or value.get("id")
+                        if isinstance(value, dict)
+                        else value
+                    )
+                    metadata = {"name": str(name), "value_redacted": True}
+                else:
+                    metadata = value if isinstance(value, dict) else {"value": value}
                 identifier = str(metadata.get("id") or metadata.get("name") or index)
                 inventory.add(
                     DiscoveredComponent(f"{kind}:{identifier}", kind, str(path), dict(metadata))
@@ -351,6 +388,36 @@ async def discover_mcp(client: MCPClient, *, source: str = "mcp") -> DiscoveryIn
     return inventory
 
 
+def discover_fastapi(app: object, *, source: str = "fastapi") -> DiscoveryInventory:
+    """Inventory routes from a live FastAPI/Starlette-style app without serving requests."""
+    inventory = DiscoveryInventory()
+    routes = getattr(app, "routes", ())
+    if not isinstance(routes, (list, tuple)):
+        return inventory
+    for route in routes:
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", ())
+        if not isinstance(path, str) or not isinstance(methods, (set, frozenset, list, tuple)):
+            continue
+        for method in sorted(str(value).upper() for value in methods):
+            if method.casefold() not in HTTP_METHODS:
+                continue
+            inventory.add(
+                DiscoveredComponent(
+                    f"api:{method}:{path}",
+                    "api",
+                    source,
+                    {
+                        "method": method,
+                        "path": path,
+                        "operation_id": getattr(route, "operation_id", None),
+                        "name": getattr(route, "name", None),
+                    },
+                )
+            )
+    return inventory
+
+
 def _add_endpoint(endpoint: Endpoint, source: str, inventory: DiscoveryInventory) -> None:
     inventory.add(
         DiscoveredComponent(
@@ -373,6 +440,21 @@ def _first_string_argument(node: ast.AST) -> str | None:
         value = node.args[0].value
         return value if isinstance(value, str) else None
     return None
+
+
+def _decorator_metadata(node: ast.AST) -> dict[str, Any]:
+    if not isinstance(node, ast.Call):
+        return {}
+    allowed = {"name", "permissions", "risk", "requires_approval", "external", "schema"}
+    metadata: dict[str, Any] = {}
+    for keyword in node.keywords:
+        if keyword.arg not in allowed:
+            continue
+        try:
+            metadata[keyword.arg] = ast.literal_eval(keyword.value)
+        except (ValueError, TypeError, SyntaxError):
+            metadata[keyword.arg] = "dynamic"
+    return metadata
 
 
 def _call_name(node: ast.AST) -> str:

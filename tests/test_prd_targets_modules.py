@@ -105,7 +105,17 @@ def test_agent_module_detects_approval_recursion_and_cost():
 def test_prompt_injection_family_coverage():
     cases = prompt_injection_cases()
     assert len(cases) >= 10
-    assert {item.source for item in cases} >= {"user", "rag", "tool", "mcp", "memory"}
+    assert {item.source for item in cases} >= {
+        "user",
+        "rag",
+        "tool",
+        "mcp",
+        "mcp-resource",
+        "memory",
+        "web",
+        "upload",
+        "multimodal",
+    }
 
 
 @pytest.mark.asyncio

@@ -6,8 +6,9 @@ import yaml
 from typer.testing import CliRunner
 
 from secgraphai.cli import app
-from secgraphai.core import Evidence, Finding, Report, Severity, Verdict
+from secgraphai.core import Evidence, Finding, Interaction, Report, Severity, Verdict
 from secgraphai.intelligence import Vulnerability, VulnerabilityCache
+from secgraphai.storage import Storage
 
 runner = CliRunner()
 
@@ -73,6 +74,49 @@ def test_cli_lifecycle_policy_report_and_baseline(tmp_path):
     invoke(["replay", bundle])
     invoke(["owasp", "coverage", report_path])
     invoke(["owasp", "gate", report_path, "--minimum-percent", "10"])
+
+
+def test_cli_test_baseline_and_historical_policy_simulation(tmp_path):
+    output = tmp_path / "current.json"
+    callback_path = f"{__name__}:callback"
+    result = invoke(["test", "--callback", callback_path, "--output", output])
+    assert json.loads(result.output)["regressions"] == [] and output.exists()
+    baselines = tmp_path / "baselines"
+    invoke(["baseline", "create", "current", output, "--root", baselines])
+    compared = invoke(
+        [
+            "test",
+            "--callback",
+            callback_path,
+            "--baseline",
+            "current",
+            "--root",
+            baselines,
+            "--fail-on-regression",
+        ]
+    )
+    assert json.loads(compared.output)["regressions"] == []
+
+    policy = tmp_path / "historical.yaml"
+    policy.write_text(
+        yaml.safe_dump(
+            {
+                "default": "allow",
+                "rules": [{"id": "deny-shell", "effect": "deny", "match": {"request.tool": "shell"}}],
+            }
+        )
+    )
+    database = tmp_path / "history.db"
+    Storage(database).save(
+        Report(
+            scan_id="history",
+            interactions=[Interaction(test_id="x", request={"tool": "shell"})],
+        )
+    )
+    historical = invoke(
+        ["policy", "simulate", policy, "--against", "last-7-days", "--database", database]
+    )
+    assert json.loads(historical.output)["would_block"] == 1
 
 
 def test_cli_cve_sbom_pack_plugin_engines_and_openapi(tmp_path):

@@ -7,6 +7,8 @@ import base64
 import importlib
 import json
 import os
+import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -83,7 +85,20 @@ app.add_typer(owasp_app, name="owasp")
 
 _STARTER = {
     "mode": "SAFE",
-    "scope": {"allowed_hosts": ["localhost"], "allowed_ports": [8000], "max_total_requests": 100},
+    "scope": {
+        "allowed_hosts": ["localhost"],
+        "allowed_ports": [8000],
+        "blocked_networks": list(Scope().blocked_networks),
+        "max_total_requests": 100,
+        "max_requests_per_second": 5,
+        "max_duration_seconds": 120,
+        "require_stable_dns": True,
+    },
+    "privacy": {
+        "telemetry": False,
+        "cloud_upload": False,
+        "mask_pii": False,
+    },
     "invariants": [
         {
             "id": "NO_SECRET_EXFIL",
@@ -155,6 +170,28 @@ def discover(
     console.print(table)
 
 
+def _run_callback_scan(
+    callback: str,
+    *,
+    budget: ScanBudget,
+    mode: Mode,
+    modules: list[str],
+    attack_budget: int,
+) -> Report:
+    module_name, separator, attribute = callback.partition(":")
+    if not separator:
+        raise typer.BadParameter("callback must use module:function syntax")
+    target_callable = getattr(importlib.import_module(module_name), attribute)
+    return asyncio.run(
+        SecGraph(budget=budget, mode=mode).scan(
+            target_callable,
+            modules=modules,
+            strategy="adaptive",
+            attack_budget=attack_budget,
+        )
+    )
+
+
 @app.command()
 def scan(
     callback: Annotated[str | None, typer.Option(help="Import path module:function")] = None,
@@ -170,6 +207,7 @@ def scan(
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     format: Annotated[str, typer.Option("--format")] = "terminal",
     mode: Annotated[Mode, typer.Option("--mode")] = Mode.SAFE,
+    mask_pii: Annotated[bool, typer.Option("--mask-pii")] = False,
 ) -> None:
     """Run bounded security checks against a callback or OpenAI-compatible target."""
     if bool(callback) == bool(target_url):
@@ -190,17 +228,12 @@ def scan(
     if profile not in modules:
         raise typer.BadParameter(f"unknown scan profile: {profile}")
     if callback:
-        module_name, separator, attribute = callback.partition(":")
-        if not separator:
-            raise typer.BadParameter("callback must use module:function syntax")
-        target_callable = getattr(importlib.import_module(module_name), attribute)
-        report = asyncio.run(
-            SecGraph(budget=budget, mode=mode).scan(
-                target_callable,
-                modules=modules[profile],
-                strategy="adaptive",
-                attack_budget=max_requests,
-            )
+        report = _run_callback_scan(
+            callback,
+            budget=budget,
+            mode=mode,
+            modules=modules[profile],
+            attack_budget=max_requests,
         )
     else:
         parsed = urlsplit(target_url or "")
@@ -222,10 +255,10 @@ def scan(
     if dashboard:
         Storage().save(report)
     if output:
-        save(report, output, None if format == "terminal" else format)
+        save(report, output, None if format == "terminal" else format, mask_pii=mask_pii)
         console.print(f"Saved {output}")
     elif format == "json":
-        typer.echo(to_json(report))
+        typer.echo(to_json(report, mask_pii=mask_pii))
     else:
         console.print(redact(report.summary()))
     if report.errors:
@@ -267,9 +300,34 @@ def diff(old: Annotated[Path, typer.Argument()], new: Annotated[Path, typer.Argu
 @app.command("test")
 def test_command(
     callback: Annotated[str, typer.Option(help="Import path module:function")],
+    baseline: Annotated[str | None, typer.Option("--baseline")] = None,
+    root: Annotated[Path, typer.Option("--root")] = Path(".secgraph/baselines"),
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    fail_on_regression: Annotated[bool, typer.Option("--fail-on-regression")] = False,
 ) -> None:
-    """Run the deterministic callback security test suite."""
-    scan(callback=callback, output=None, format="terminal")
+    """Run deterministic callback tests and optionally enforce a stored baseline."""
+    report = _run_callback_scan(
+        callback,
+        budget=ScanBudget(max_requests=100, max_duration_seconds=120),
+        mode=Mode.SAFE,
+        modules=["prompt-injection", "agent"],
+        attack_budget=100,
+    )
+    regressions: list[str] = []
+    if baseline:
+        regressions = [item.id for item in diff_reports(BaselineStore(root).load(baseline), report)["new"]]
+    if output:
+        save(report, output, "json")
+    typer.echo(
+        json.dumps(
+            {"scan_id": report.scan_id, "summary": report.summary(), "regressions": regressions},
+            sort_keys=True,
+        )
+    )
+    if report.errors:
+        raise typer.Exit(2)
+    if fail_on_regression and regressions:
+        raise typer.Exit(1)
 
 
 @app.command("compare")
@@ -333,14 +391,33 @@ def serve(
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port")] = 8777,
     token_env: Annotated[str, typer.Option("--token-env")] = "SECGRAPH_DASHBOARD_TOKEN",  # noqa: S107
+    retention_days: Annotated[int | None, typer.Option("--retention-days")] = None,
+    encryption_key_env: Annotated[
+        str | None, typer.Option("--encryption-key-env")
+    ] = None,
+    mask_pii: Annotated[bool, typer.Option("--mask-pii")] = False,
 ) -> None:  # nosec B107
     """Start the authenticated local dashboard API."""
     token = os.environ.get(token_env)
     if not token:
         raise typer.BadParameter(f"set {token_env} to a strong dashboard token")
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        console.print("Warning: remote dashboard binding requires trusted TLS termination.")
     import uvicorn
 
-    uvicorn.run(create_app(database=database, token=token, bind_host=host), host=host, port=port)
+    uvicorn.run(
+        create_app(
+            database=database,
+            token=token,
+            bind_host=host,
+            retention_days=retention_days,
+            encryption_key_env=encryption_key_env,
+            mask_pii=mask_pii,
+            allow_remote=host not in {"127.0.0.1", "localhost", "::1"},
+        ),
+        host=host,
+        port=port,
+    )
 
 
 @app.command("dev")
@@ -354,6 +431,9 @@ def dev(
         host="127.0.0.1",
         port=port,
         token_env="SECGRAPH_DASHBOARD_TOKEN",  # noqa: S106  # nosec B106
+        retention_days=None,
+        encryption_key_env=None,
+        mask_pii=False,
     )
 
 
@@ -374,9 +454,28 @@ def policy_test(
 
 @policy_app.command("simulate")
 def policy_simulate(
-    path: Annotated[Path, typer.Argument()], events: Annotated[Path, typer.Argument()]
+    path: Annotated[Path, typer.Argument()],
+    events: Annotated[Path | None, typer.Argument()] = None,
+    against: Annotated[str | None, typer.Option("--against")] = None,
+    database: Annotated[Path, typer.Option("--database")] = Path("secgraph.db"),
 ) -> None:
-    raw = json.loads(events.read_text(encoding="utf-8"))
+    if bool(events) == bool(against):
+        raise typer.BadParameter("provide exactly one events file or --against last-N-days")
+    if events:
+        raw = json.loads(events.read_text(encoding="utf-8"))
+    else:
+        match = re.fullmatch(r"last-(\d+)-days", against or "")
+        if not match or int(match.group(1)) < 1:
+            raise typer.BadParameter("--against must use last-N-days with a positive N")
+        cutoff = datetime.now(UTC) - timedelta(days=int(match.group(1)))
+        raw = [
+            interaction.model_dump(mode="json")
+            for report in Storage(database).list(limit=1000)
+            if report.finished_at >= cutoff
+            for interaction in report.interactions
+        ]
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise typer.BadParameter("policy simulation events must be a JSON array of objects")
     summary = PolicyEngine.from_yaml(path).summarize(raw)
     typer.echo(json.dumps(summary.__dict__, default=str, sort_keys=True))
 
@@ -427,8 +526,14 @@ def report_render(
     report: Annotated[Path, typer.Argument()],
     output: Annotated[Path, typer.Argument()],
     format: Annotated[str | None, typer.Option("--format")] = None,
+    mask_pii: Annotated[bool, typer.Option("--mask-pii")] = False,
 ) -> None:
-    save(Report.model_validate_json(report.read_text(encoding="utf-8")), output, format)
+    save(
+        Report.model_validate_json(report.read_text(encoding="utf-8")),
+        output,
+        format,
+        mask_pii=mask_pii,
+    )
 
 
 @cve_app.command("search")
@@ -466,7 +571,22 @@ def cve_sync(
     next_index = previous.get("next_start_index") if previous.get("query") == query else None
     start_index = next_index if isinstance(next_index, int) and next_index >= 0 else 0
     client = NVDClient()
-    values = asyncio.run(client.search(query, start_index=start_index))
+    synchronized_at = previous.get("synchronized_at")
+    if previous.get("query") == query and start_index == 0 and isinstance(synchronized_at, str):
+        prior_etag = previous.get("etag")
+        prior_modified = previous.get("last_modified")
+        values = asyncio.run(
+            client.search(
+                query,
+                start_index=0,
+                etag=prior_etag if isinstance(prior_etag, str) else None,
+                last_modified=prior_modified if isinstance(prior_modified, str) else None,
+                last_mod_start_date=synchronized_at,
+                last_mod_end_date=datetime.now(UTC).isoformat(),
+            )
+        )
+    else:
+        values = asyncio.run(client.search(query, start_index=start_index))
     merged = stored.merge(values, metadata={"query": query, **client.response_metadata})
     typer.echo(
         json.dumps(

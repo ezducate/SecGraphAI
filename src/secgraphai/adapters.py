@@ -68,13 +68,23 @@ class Adapter:
         for index, record in enumerate(records):
             if not isinstance(record, dict):
                 continue
+            mappings = record.get("mappings", {})
+            safe_mappings = (
+                {
+                    str(key): [str(item) for item in value]
+                    for key, value in mappings.items()
+                    if isinstance(value, list)
+                }
+                if isinstance(mappings, dict)
+                else {}
+            )
             findings.append(
                 Finding(
-                    id=str(record.get("id", f"{self.name}-{index}")),
-                    title=str(record.get("title", "External engine finding")),
-                    severity=Severity(str(record.get("severity", "MEDIUM")).upper()),
-                    verdict=Verdict(str(record.get("verdict", "LIKELY_VIOLATION")).upper()),
-                    confidence=float(record.get("confidence", 0.5)),
+                    id=str(record.get("id", f"{self.name}-{index}"))[:200],
+                    title=str(record.get("title", "External engine finding"))[:4_000],
+                    severity=Severity(_severity(record.get("severity"))),
+                    verdict=_verdict(record.get("verdict")),
+                    confidence=_confidence(record.get("confidence")),
                     evidence=[
                         Evidence(
                             kind=f"adapter:{self.name}",
@@ -82,7 +92,7 @@ class Adapter:
                             metadata={"engine": self.name, "raw_id": record.get("id")},
                         )
                     ],
-                    mappings=dict(record.get("mappings", {})),
+                    mappings=safe_mappings,
                 )
             )
         return findings
@@ -144,6 +154,62 @@ def normalize_engine_output(name: str, output: dict[str, object]) -> list[dict[s
             for dependency in _records(dependencies)
             for vulnerability in _records(dependency.get("vulns"))
         ]
+    if normalized == "detect-secrets":
+        results = output.get("results", {})
+        return [
+            {
+                "id": f"{path}:{item.get('line_number', index)}",
+                "title": str(item.get("type", "Potential secret")),
+                "severity": "HIGH",
+            }
+            for path, values in (results.items() if isinstance(results, dict) else ())
+            if isinstance(path, str)
+            for index, item in enumerate(_records(values), 1)
+        ]
+    if normalized == "osv":
+        vulnerabilities = _records(output.get("vulns"))
+        for result in _records(output.get("results")):
+            vulnerabilities.extend(_records(result.get("vulnerabilities")))
+            for package in _records(result.get("packages")):
+                vulnerabilities.extend(_records(package.get("vulnerabilities")))
+        return [
+            {
+                "id": item.get("id"),
+                "title": item.get("summary") or item.get("details") or "OSV vulnerability",
+                "severity": _severity(item.get("severity", "high")),
+                "mappings": {"aliases": item.get("aliases", [])},
+            }
+            for item in vulnerabilities
+        ]
+    if normalized == "presidio":
+        return [
+            {
+                "id": f"{item.get('entity_type', 'PII')}:{item.get('start', index)}",
+                "title": f"Detected {item.get('entity_type', 'sensitive data')}",
+                "severity": "HIGH",
+                "confidence": item.get("score", 0.5),
+            }
+            for index, item in enumerate(_records(output.get("results")), 1)
+        ]
+    if normalized == "llmguard" and output.get("is_valid") is False:
+        return [
+            {
+                "id": output.get("scanner", "llmguard"),
+                "title": output.get("reason", "LLM Guard rejected content"),
+                "severity": "HIGH",
+                "confidence": output.get("risk_score", 0.8),
+            }
+        ]
+    if normalized == "modelscan":
+        values = output.get("issues", output.get("results", []))
+        return [
+            _common_record(item, normalized, index)
+            for index, item in enumerate(_records(values), 1)
+        ]
+    for key in ("results", "vulnerabilities", "issues", "failures", "probes", "tests"):
+        records = _records(output.get(key))
+        if records:
+            return [_common_record(item, normalized, index) for index, item in enumerate(records, 1)]
     return []
 
 
@@ -168,6 +234,31 @@ def _records(value: object) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
+def _common_record(item: dict[str, Any], engine: str, index: int) -> dict[str, Any]:
+    identifier = next(
+        (item[key] for key in ("id", "test_id", "test", "name", "type") if item.get(key)),
+        f"{engine}-{index}",
+    )
+    title = next(
+        (
+            item[key]
+            for key in ("title", "message", "description", "reason", "name")
+            if item.get(key)
+        ),
+        f"{engine} finding",
+    )
+    status = str(item.get("status", item.get("verdict", ""))).casefold()
+    verdict = "PASS" if status in {"pass", "passed", "safe"} else "LIKELY_VIOLATION"
+    return {
+        "id": str(identifier),
+        "title": str(title),
+        "severity": _severity(item.get("severity", item.get("level", item.get("risk")))),
+        "verdict": verdict,
+        "confidence": item.get("confidence", item.get("score", 0.5)),
+        "mappings": item.get("mappings", {}),
+    }
+
+
 def _severity(value: object) -> str:
     return {
         "critical": "CRITICAL",
@@ -179,3 +270,20 @@ def _severity(value: object) -> str:
         "note": "LOW",
         "info": "INFO",
     }.get(str(value).casefold(), "MEDIUM")
+
+
+def _verdict(value: object) -> Verdict:
+    try:
+        return Verdict(str(value or "LIKELY_VIOLATION").upper())
+    except ValueError:
+        return Verdict.INCONCLUSIVE
+
+
+def _confidence(value: object) -> float:
+    candidate = value if value is not None else 0.5
+    if not isinstance(candidate, (str, int, float)):
+        return 0.0
+    try:
+        return min(1.0, max(0.0, float(candidate)))
+    except ValueError:
+        return 0.0

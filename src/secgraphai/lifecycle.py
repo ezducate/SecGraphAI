@@ -87,6 +87,10 @@ def finalize_report(
         "interactions": [item.model_dump(mode="json") for item in report.interactions],
         "graph": report.graph,
         "limitations": report.limitations,
+        "reports": report.model_copy(update={"findings": findings}).model_dump(
+            mode="json", exclude={"manifest"}
+        ),
+        "regression_tests": [regression_bundle(item) for item in findings],
     }
     hashes = {name: artifact_hash(value) for name, value in artifacts.items()}
     manifest = report.manifest.model_copy(
@@ -156,7 +160,14 @@ def save_replay(
             archive.writestr(name, value)
 
 
-def load_replay(path: str | Path, max_bytes: int = 10_000_000) -> tuple[Report, dict[str, object]]:
+def load_replay(
+    path: str | Path,
+    max_bytes: int = 10_000_000,
+    *,
+    max_compression_ratio: float = 100,
+) -> tuple[Report, dict[str, object]]:
+    if max_bytes < 1 or max_compression_ratio <= 0:
+        raise ValueError("replay archive limits must be positive")
     with zipfile.ZipFile(path) as archive:
         listed_names = archive.namelist()
         names = set(listed_names)
@@ -173,6 +184,7 @@ def load_replay(path: str | Path, max_bytes: int = 10_000_000) -> tuple[Report, 
             raise ValueError("replay archive exceeds expanded size limit")
         if any(
             info.file_size > max_bytes
+            or info.file_size / max(1, info.compress_size) > max_compression_ratio
             or ".." in Path(info.filename).parts
             or Path(info.filename).is_absolute()
             for info in archive.infolist()

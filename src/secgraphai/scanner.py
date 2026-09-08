@@ -46,6 +46,9 @@ class TargetResult:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0
+    retries: int = 0
+    retrieval_calls: int = 0
+    external_calls: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -183,6 +186,10 @@ class SecGraph:
                         output_tokens=target_result.output_tokens,
                         model_calls=1,
                         tool_calls=len(target_result.tools),
+                        retries=target_result.retries,
+                        retrieval_calls=target_result.retrieval_calls,
+                        external_calls=target_result.external_calls,
+                        cost_usd=target_result.cost_usd,
                     )
                 )
                 if secret.observed_in(output):
@@ -246,7 +253,12 @@ class SecGraph:
                 flow = target_result.metadata.get("flow")
                 if isinstance(flow, dict):
                     for evaluation in InvariantEngine(self.invariants).evaluate_flow(
-                        dict(flow.get("source", {})), dict(flow.get("destination", {}))
+                        dict(flow.get("source", {})),
+                        dict(flow.get("destination", {})),
+                        principal=dict(flow.get("principal", {})),
+                        tool=str(flow["tool"]) if flow.get("tool") is not None else None,
+                        context=dict(flow.get("context", {})),
+                        controls=flow.get("controls") or (),
                     ):
                         if evaluation.verdict != Verdict.PASS:
                             findings.append(
@@ -395,6 +407,7 @@ class SecGraph:
             max_duration_seconds=float(
                 scope_document.get("max_duration_seconds", self.budget.max_duration_seconds)
             ),
+            require_stable_dns=bool(scope_document.get("require_stable_dns", True)),
         )
         model = Model(
             base_url=base_url,

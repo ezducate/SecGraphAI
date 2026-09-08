@@ -62,6 +62,10 @@ class Interaction(BaseModel):
     output_tokens: int = Field(default=0, ge=0)
     model_calls: int = Field(default=0, ge=0)
     tool_calls: int = Field(default=0, ge=0)
+    retries: int = Field(default=0, ge=0)
+    retrieval_calls: int = Field(default=0, ge=0)
+    external_calls: int = Field(default=0, ge=0)
+    cost_usd: float = Field(default=0, ge=0)
 
 
 class ScanManifest(BaseModel):
@@ -133,6 +137,10 @@ class Report(BaseModel):
             "output_tokens": sum(item.output_tokens for item in self.interactions),
             "model_calls": sum(item.model_calls for item in self.interactions),
             "tool_calls": sum(item.tool_calls for item in self.interactions),
+            "retries": sum(item.retries for item in self.interactions),
+            "retrieval_calls": sum(item.retrieval_calls for item in self.interactions),
+            "external_calls": sum(item.external_calls for item in self.interactions),
+            "cost_usd": round(sum(item.cost_usd for item in self.interactions), 6),
             "wall_time_ms": round(sum(item.duration_ms for item in self.interactions), 3),
         }
 

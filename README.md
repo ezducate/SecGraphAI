@@ -12,7 +12,7 @@ It includes OpenAPI/identity, RAG, MCP, provenance and policy testing; independe
 attack, judge, and remediation model roles; adaptive attack selection and signed packs;
 baselines, safe replay bundles, pytest regression generation, SARIF/JUnit output; OWASP
 profiles, CycloneDX/SPDX and offline CVE intelligence; plugin process/container isolation;
-an authenticated, local-only dashboard; utility/cost comparisons; research draft import;
+an authenticated, local-by-default dashboard; utility/cost comparisons; research draft import;
 model supply-chain inspection; and bounded multimodal artifact handling.
 
 ## Install
@@ -82,7 +82,7 @@ Common starting points:
 - baselines, differential utility/security measurement, tamper-checked replay bundles,
   generated pytest/YAML/CI regressions, and SQLite storage
 - JSON, JSONL, HTML, Markdown, CSV, SARIF, JUnit, and optional PDF reports
-- authenticated local dashboard/API with security headers, limits, and live events
+- authenticated local-by-default dashboard/API with dedicated views, security headers, limits, and live events
 - CycloneDX/SPDX generation and ingestion, NVD/CVSS/CWE/KEV parsing, affected-version and reachability gates
 - permission-gated subprocess adapters, Ed25519 pack verification, doctor, and self-audit
 
