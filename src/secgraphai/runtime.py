@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import inspect
 import time
+from collections import defaultdict, deque
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -75,6 +76,7 @@ class ApprovalAspect(SecurityAspect):
 class RuntimePolicyAspect(SecurityAspect):
     def __init__(self, engine: PolicyEngine) -> None:
         self.engine = engine
+        self._rate_events: dict[str, deque[float]] = defaultdict(deque)
 
     async def before(self, ctx: SecurityContext, metadata: dict[str, Any]) -> None:
         self.before_sync(ctx, metadata)
@@ -104,6 +106,20 @@ class RuntimePolicyAspect(SecurityAspect):
             raise PolicyDenied(decision.reason)
         if decision.effect == Effect.REQUIRE_APPROVAL and not ctx.approved:
             raise PolicyDenied(decision.reason or "policy requires approval")
+        if decision.effect == Effect.SANDBOX and not metadata.get("sandboxed"):
+            raise PolicyDenied(f"policy requires sandboxed execution: {decision.reason}")
+        if decision.effect == Effect.RATE_LIMIT:
+            maximum = int(decision.metadata.get("maximum", 1))
+            window = float(decision.metadata.get("window_seconds", 60))
+            if maximum < 1 or window <= 0:
+                raise PolicyDenied("invalid policy rate-limit configuration")
+            now = time.monotonic()
+            events = self._rate_events[decision.rule_id]
+            while events and now - events[0] >= window:
+                events.popleft()
+            if len(events) >= maximum:
+                raise PolicyDenied(f"policy rate limit exceeded: {decision.reason}")
+            events.append(now)
 
     async def after(self, ctx: SecurityContext, metadata: dict[str, Any], result: Any) -> Any:
         return self.after_sync(ctx, metadata, result)
@@ -112,7 +128,19 @@ class RuntimePolicyAspect(SecurityAspect):
         decision = self.engine.evaluate(
             {**metadata, "user": ctx.user, "tenant": ctx.tenant, "labels": sorted(ctx.labels)}
         )
-        return redact(result) if decision.enforced and decision.effect == Effect.REDACT else result
+        if not decision.enforced:
+            return result
+        if decision.effect == Effect.REDACT:
+            return redact(result)
+        if decision.effect == Effect.TRANSFORM:
+            transform = decision.metadata.get("transform", "redact")
+            if transform == "redact":
+                return redact(result)
+            if transform == "drop_fields" and isinstance(result, dict):
+                blocked = {str(item) for item in decision.metadata.get("fields", [])}
+                return {key: value for key, value in result.items() if key not in blocked}
+            raise PolicyDenied("unsupported safe policy transformation")
+        return result
 
 
 class RateLimitAspect(SecurityAspect):

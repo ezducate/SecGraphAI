@@ -8,6 +8,8 @@ from typing import Any
 
 import httpx
 
+from secgraphai.security import ScopeGuard
+
 
 class ModelError(RuntimeError):
     pass
@@ -23,6 +25,7 @@ class Model:
         api_key_env: str | None = None,
         timeout: float = 30,
         max_response_bytes: int = 2_000_000,
+        scope_guard: ScopeGuard | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -30,6 +33,7 @@ class Model:
         self.api_key_env = api_key_env
         self.timeout = httpx.Timeout(timeout, connect=min(timeout, 10))
         self.max_response_bytes = max_response_bytes
+        self.scope_guard = scope_guard
 
     def _key(self) -> str | None:
         return self._api_key or (os.environ.get(self.api_key_env) if self.api_key_env else None)
@@ -39,15 +43,23 @@ class Model:
         if key := self._key():
             headers["Authorization"] = f"Bearer {key}"
         payload = {"model": self.model, "messages": list(messages), **parameters}
+        endpoint = f"{self.base_url}/chat/completions"
+        if self.scope_guard is not None:
+            self.scope_guard.authorize(endpoint)
         try:
             async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
                 async with client.stream(
-                    "POST", f"{self.base_url}/chat/completions", json=payload, headers=headers
+                    "POST", endpoint, json=payload, headers=headers
                 ) as response:
                     response.raise_for_status()
-                    data = await response.aread()
-                    if len(data) > self.max_response_bytes:
-                        raise ModelError("model response exceeds configured size limit")
+                    chunks: list[bytes] = []
+                    size = 0
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > self.max_response_bytes:
+                            raise ModelError("model response exceeds configured size limit")
+                        chunks.append(chunk)
+                    data = b"".join(chunks)
         except httpx.HTTPError as exc:
             raise ModelError(f"model request failed: {type(exc).__name__}") from exc
         try:

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from secgraphai.core import Report
+from secgraphai.intelligence import OWASP_PROFILES, coverage
 from secgraphai.lifecycle import regression_bundle
 from secgraphai.policy import Effect, PolicyEngine, Rule
 from secgraphai.self_security import run_self_audit
@@ -42,8 +43,6 @@ def create_app(
 
     app = FastAPI(title="SecGraphAI", docs_url=None, redoc_url=None)
     storage = Storage(database)
-    targets: list[dict[str, Any]] = []
-    policies: list[dict[str, Any]] = []
     request_times: dict[str, deque[float]] = defaultdict(deque)
     static_root = files("secgraphai").joinpath("static")
     app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
@@ -93,13 +92,13 @@ def create_app(
 
     @app.get("/api/v1/targets", dependencies=[Depends(authenticate)])
     def list_targets() -> list[dict[str, Any]]:
-        return targets
+        return storage.list_documents("targets")
 
     @app.post("/api/v1/targets", dependencies=[Depends(authenticate)])
     def add_target(target: dict[str, Any]) -> dict[str, Any]:
         if not target.get("id") or not target.get("type"):
             raise HTTPException(status_code=422, detail="target requires id and type")
-        targets.append(target)
+        storage.put_document("targets", str(target["id"]), target)
         return target
 
     @app.get("/api/v1/scans", dependencies=[Depends(authenticate)])
@@ -148,11 +147,19 @@ def create_app(
 
     @app.get("/api/v1/attack-paths", dependencies=[Depends(authenticate)])
     def attack_paths() -> list[Any]:
-        return list(graph().get("risk_paths", []))
+        stored = storage.attack_paths()
+        return stored or list(graph().get("risk_paths", []))
 
     @app.get("/api/v1/policies", dependencies=[Depends(authenticate)])
     def list_policies() -> list[dict[str, Any]]:
-        return policies
+        return storage.list_documents("policies")
+
+    @app.post("/api/v1/policies", dependencies=[Depends(authenticate)])
+    def add_policy(document: dict[str, Any]) -> dict[str, Any]:
+        if not document.get("id") or not isinstance(document.get("rules", []), list):
+            raise HTTPException(status_code=422, detail="policy requires id and rules")
+        storage.put_document("policies", str(document["id"]), document)
+        return document
 
     @app.post("/api/v1/policies/test", dependencies=[Depends(authenticate)])
     def test_policy(document: dict[str, Any]) -> dict[str, Any]:
@@ -163,6 +170,7 @@ def create_app(
                 dict(item.get("match", {})),
                 str(item.get("reason", "")),
                 int(item.get("priority", 0)),
+                dict(item.get("options", {})),
             )
             for item in document.get("rules", [])
         ]
@@ -191,12 +199,49 @@ def create_app(
     def self_audit() -> dict[str, object]:
         return run_self_audit(database=database).as_dict()
 
+    @app.get("/api/v1/vulnerabilities", dependencies=[Depends(authenticate)])
+    def vulnerabilities() -> list[dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {}
+        for report in storage.list(limit=1000):
+            for finding_item in report.findings:
+                for cve_id in finding_item.cve_ids:
+                    result.setdefault(
+                        cve_id,
+                        {
+                            "id": cve_id,
+                            "finding_ids": [],
+                            "known_exploited": finding_item.known_exploited,
+                        },
+                    )["finding_ids"].append(finding_item.id)
+        return list(result.values())
+
+    @app.get("/api/v1/owasp-coverage", dependencies=[Depends(authenticate)])
+    def owasp_coverage(profile: str = "llm-2026") -> dict[str, object]:
+        if profile not in OWASP_PROFILES:
+            raise HTTPException(status_code=404, detail="unknown OWASP profile")
+        observed = {
+            category
+            for report in storage.list(limit=1000)
+            for finding_item in report.findings
+            for categories in finding_item.mappings.values()
+            for category in categories
+        }
+        return coverage(profile, observed)
+
     @app.websocket("/api/v1/events")
     async def events(websocket: WebSocket) -> None:
-        if not hmac.compare_digest(websocket.query_params.get("token", ""), token):
+        authorization = websocket.headers.get("authorization", "").removeprefix("Bearer ")
+        protocols = [
+            item.strip() for item in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        ]
+        protocol_token = (
+            protocols[1] if len(protocols) == 2 and protocols[0] == "secgraphai" else ""
+        )
+        supplied = authorization or protocol_token
+        if not hmac.compare_digest(supplied, token):
             await websocket.close(code=4401)
             return
-        await websocket.accept()
+        await websocket.accept(subprotocol="secgraphai" if protocol_token else None)
         try:
             while True:
                 await websocket.send_json({"type": "heartbeat", "time": time.time()})

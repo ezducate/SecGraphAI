@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
 import re
+import sys
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -27,12 +29,35 @@ def artifact_hash(value: Any) -> str:
 def finalize_report(
     report: Report, *, configuration: Any = None, policies: Any = None, test_definitions: Any = None
 ) -> Report:
+    findings = []
+    for item in report.findings:
+        evidence = [
+            value
+            if value.sha256
+            else value.model_copy(
+                update={"sha256": artifact_hash(value.model_dump(mode="json", exclude={"sha256"}))}
+            )
+            for value in item.evidence
+        ]
+        findings.append(
+            item.model_copy(
+                update={
+                    "evidence": evidence,
+                    "fingerprint": item.fingerprint or fingerprint(item),
+                }
+            )
+        )
     artifacts = {
         "configuration": configuration or {},
         "policies": policies or [],
         "tests": test_definitions or [],
-        "findings": [item.model_dump(mode="json") for item in report.findings],
+        "evidence": [
+            evidence.model_dump(mode="json") for item in findings for evidence in item.evidence
+        ],
+        "findings": [item.model_dump(mode="json") for item in findings],
         "interactions": [item.model_dump(mode="json") for item in report.interactions],
+        "graph": report.graph,
+        "limitations": report.limitations,
     }
     hashes = {name: artifact_hash(value) for name, value in artifacts.items()}
     manifest = report.manifest.model_copy(
@@ -40,12 +65,13 @@ def finalize_report(
             "artifact_hashes": hashes,
             "config_hash": hashes["configuration"],
             "policy_hash": hashes["policies"],
+            "environment": {
+                "python": platform.python_version(),
+                "implementation": platform.python_implementation(),
+                "platform": sys.platform,
+            },
         }
     )
-    findings = [
-        item.model_copy(update={"fingerprint": item.fingerprint or fingerprint(item)})
-        for item in report.findings
-    ]
     return report.model_copy(update={"findings": findings, "manifest": manifest})
 
 

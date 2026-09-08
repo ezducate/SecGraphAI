@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from secgraphai.core import Finding
@@ -70,7 +72,11 @@ class Vulnerability:
     ssvc: tuple[SSVCDecision, ...] = ()
     status: Reachability = Reachability.PRESENT
     affected_versions: tuple[str, ...] = ()
+    affected_ranges: tuple[tuple[str, ...], ...] = ()
     references: tuple[str, ...] = ()
+    source: str = "unknown"
+    published: str | None = None
+    last_modified: str | None = None
 
     @property
     def priority(self) -> float:
@@ -255,7 +261,11 @@ class VulnerabilityCache:
                 "ssvc": [item.__dict__ for item in v.ssvc],
                 "status": v.status.value,
                 "affected_versions": list(v.affected_versions),
+                "affected_ranges": [list(group) for group in v.affected_ranges],
                 "references": list(v.references),
+                "source": v.source,
+                "published": v.published,
+                "last_modified": v.last_modified,
             }
             for v in vulnerabilities
         ]
@@ -270,10 +280,15 @@ class VulnerabilityCache:
     def search(self, query: str) -> list[Vulnerability]:
         if not self.path.exists():
             return []
-        records = [
-            _vulnerability_from_dict(item)
-            for item in json.loads(self.path.read_text(encoding="utf-8"))
-        ]
+        try:
+            document = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(document, list) or not all(
+                isinstance(item, dict) for item in document
+            ):
+                raise ValueError
+            records = [_vulnerability_from_dict(item) for item in document]
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError("vulnerability cache is corrupt") from exc
         needle = query.casefold()
         return [
             v
@@ -301,31 +316,26 @@ def security_gate(
 def affected(component: Component, vulnerability: Vulnerability) -> bool | None:
     if component.name.casefold() != vulnerability.component.casefold():
         return False
-    if not vulnerability.affected_versions:
+    groups = vulnerability.affected_ranges or (
+        (vulnerability.affected_versions,) if vulnerability.affected_versions else ()
+    )
+    if not groups:
         return None
     try:
         installed = Version(component.version)
     except InvalidVersion:
         return None
-    for expression in vulnerability.affected_versions:
-        operator = next(
-            (item for item in (">=", "<=", "!=", "==", ">", "<") if expression.startswith(item)),
-            "==",
-        )
+    outcomes = []
+    for group in groups:
+        expressions = [item.strip() for item in group if item.strip()]
+        if not expressions:
+            return None
         try:
-            expected = Version(expression.removeprefix(operator).strip())
-        except InvalidVersion:
-            continue
-        if {
-            "==": installed == expected,
-            "!=": installed != expected,
-            ">=": installed >= expected,
-            "<=": installed <= expected,
-            ">": installed > expected,
-            "<": installed < expected,
-        }[operator]:
-            return True
-    return False
+            specifier = SpecifierSet(",".join(expressions))
+        except InvalidSpecifier:
+            return None
+        outcomes.append(specifier.contains(installed, prereleases=True))
+    return any(outcomes)
 
 
 def correlate_finding(finding: Finding, vulnerabilities: Iterable[Vulnerability]) -> Finding:
@@ -349,47 +359,70 @@ def parse_nvd(document: dict[str, Any]) -> list[Vulnerability]:
     results = []
     for entry in document.get("vulnerabilities", []):
         cve = entry.get("cve", {}) if isinstance(entry, dict) else {}
+        cve_id = str(cve.get("id", ""))
+        if not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve_id):
+            continue
         descriptions = cve.get("descriptions", [])
         description = next(
-            (item.get("value", "") for item in descriptions if item.get("lang") == "en"), ""
+            (
+                str(item.get("value", ""))
+                for item in descriptions
+                if isinstance(item, dict) and item.get("lang") == "en"
+            ),
+            "",
         )
         metrics = []
-        for name, values in cve.get("metrics", {}).items():
+        metric_document = cve.get("metrics", {})
+        for name, values in metric_document.items() if isinstance(metric_document, dict) else []:
             for value in values if isinstance(values, list) else []:
+                if not isinstance(value, dict):
+                    continue
                 data = value.get("cvssData", {})
-                if data.get("baseScore") is not None:
+                if isinstance(data, dict) and data.get("baseScore") is not None:
+                    try:
+                        score = float(data["baseScore"])
+                    except (TypeError, ValueError):
+                        continue
                     metrics.append(
                         CVSSMetric(
                             str(data.get("version", name)),
                             str(data.get("vectorString", "")),
-                            float(data["baseScore"]),
+                            score,
                             data.get("threatScore"),
                             data.get("environmentalScore"),
                         )
                     )
-        weaknesses = frozenset(
-            item.get("value")
-            for group in cve.get("weaknesses", [])
-            for item in group.get("description", [])
-            if str(item.get("value", "")).startswith("CWE-")
-        )
+        weaknesses = frozenset(_nvd_weaknesses(cve.get("weaknesses", [])))
         references = tuple(
-            str(item.get("url")) for item in cve.get("references", []) if item.get("url")
+            str(item.get("url"))
+            for item in cve.get("references", [])
+            if isinstance(item, dict) and item.get("url")
         )
         severity = max((item.base_score for item in metrics), default=0)
-        results.append(
-            Vulnerability(
-                str(cve.get("id", "")),
-                "unknown",
-                severity,
-                aliases=frozenset(),
-                description=description,
-                cwe_ids=weaknesses,
-                cvss=tuple(metrics),
-                references=references,
+        affected_components = _nvd_affected_components(cve.get("configurations", []))
+        if not affected_components:
+            affected_components = {"unknown": []}
+        for component, ranges in affected_components.items():
+            results.append(
+                Vulnerability(
+                    cve_id,
+                    component,
+                    severity,
+                    aliases=frozenset(),
+                    description=description,
+                    cwe_ids=weaknesses,
+                    cvss=tuple(metrics),
+                    affected_ranges=tuple(ranges),
+                    references=references,
+                    source=str(cve.get("sourceIdentifier", "NVD")),
+                    published=str(cve.get("published")) if cve.get("published") else None,
+                    last_modified=str(cve.get("lastModified")) if cve.get("lastModified") else None,
+                )
             )
-        )
-    return [item for item in results if item.id]
+    unique: dict[tuple[str, str], Vulnerability] = {}
+    for item in results:
+        unique[(item.id, item.component)] = item
+    return list(unique.values())
 
 
 class NVDClient:
@@ -413,15 +446,27 @@ class NVDClient:
             {"apiKey": os.environ[self.api_key_env]} if os.environ.get(self.api_key_env) else {}
         )
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
-            response = await client.get(
+            async with client.stream(
+                "GET",
                 self.endpoint,
                 params={"keywordSearch": query, "resultsPerPage": 2000},
                 headers=headers,
-            )
-            response.raise_for_status()
-            if len(response.content) > self.max_response_bytes:
-                raise ValueError("NVD response exceeds configured limit")
-        return parse_nvd(response.json())
+            ) as response:
+                response.raise_for_status()
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > self.max_response_bytes:
+                        raise ValueError("NVD response exceeds configured limit")
+                    chunks.append(chunk)
+        try:
+            document = json.loads(b"".join(chunks))
+        except json.JSONDecodeError as exc:
+            raise ValueError("NVD response is invalid JSON") from exc
+        if not isinstance(document, dict):
+            raise ValueError("NVD response must be an object")
+        return parse_nvd(document)
 
 
 def _vulnerability_from_dict(item: dict[str, Any]) -> Vulnerability:
@@ -434,9 +479,53 @@ def _vulnerability_from_dict(item: dict[str, Any]) -> Vulnerability:
             "ssvc": tuple(SSVCDecision(**value) for value in item.get("ssvc", [])),
             "status": Reachability(item.get("status", "PRESENT")),
             "affected_versions": tuple(item.get("affected_versions", [])),
+            "affected_ranges": tuple(tuple(group) for group in item.get("affected_ranges", [])),
             "references": tuple(item.get("references", [])),
         }
     )
+
+
+def _nvd_weaknesses(groups: Any) -> list[str]:
+    if not isinstance(groups, list):
+        return []
+    return [
+        str(item["value"])
+        for group in groups
+        if isinstance(group, dict) and isinstance(group.get("description"), list)
+        for item in group["description"]
+        if isinstance(item, dict) and str(item.get("value", "")).startswith("CWE-")
+    ]
+
+
+def _nvd_affected_components(configurations: Any) -> dict[str, list[tuple[str, ...]]]:
+    """Extract safe PEP 440-style bounds from NVD CPE matches without fetching CPE URLs."""
+    result: dict[str, list[tuple[str, ...]]] = {}
+    if not isinstance(configurations, list):
+        return result
+    for configuration in configurations:
+        nodes = configuration.get("nodes", []) if isinstance(configuration, dict) else []
+        for node in nodes if isinstance(nodes, list) else []:
+            matches = node.get("cpeMatch", []) if isinstance(node, dict) else []
+            for match in matches if isinstance(matches, list) else []:
+                if not isinstance(match, dict) or match.get("vulnerable") is False:
+                    continue
+                parts = str(match.get("criteria", "")).split(":")
+                if len(parts) < 6 or parts[:3] != ["cpe", "2.3", "a"]:
+                    continue
+                component = parts[4].replace("\\", "")
+                bounds = []
+                for field, operator in (
+                    ("versionStartIncluding", ">="),
+                    ("versionStartExcluding", ">"),
+                    ("versionEndIncluding", "<="),
+                    ("versionEndExcluding", "<"),
+                ):
+                    if match.get(field):
+                        bounds.append(f"{operator}{match[field]}")
+                if not bounds and parts[5] not in {"*", "-"}:
+                    bounds.append(f"=={parts[5]}")
+                result.setdefault(component, []).append(tuple(bounds))
+    return result
 
 
 OWASP_PROFILES = {

@@ -11,22 +11,28 @@ import networkx as nx
 
 class NodeType(StrEnum):
     USER = "User"
+    PRINCIPAL = "Principal"
     IDENTITY = "Identity"
+    SESSION = "Session"
     AGENT = "Agent"
     MODEL = "Model"
     PROMPT = "Prompt"
     MEMORY = "Memory"
     RETRIEVER = "Retriever"
     DOCUMENT = "Document"
+    EMBEDDING = "Embedding"
     VECTOR_STORE = "VectorStore"
     TOOL = "Tool"
     MCP_SERVER = "MCPServer"
+    MCP_RESOURCE = "MCPResource"
     API_ENDPOINT = "APIEndpoint"
     DATABASE = "Database"
+    FILE = "File"
     # Graph classification label, not a credential.
     SECRET = "Secret"  # noqa: S105  # nosec B105
     DATA_ASSET = "DataAsset"
     EXTERNAL_SERVICE = "ExternalService"
+    BROWSER = "Browser"
     NETWORK_BOUNDARY = "NetworkBoundary"
     COMPONENT = "Component"
     VULNERABILITY = "Vulnerability"
@@ -88,6 +94,30 @@ class SecurityGraph:
             n for n, a in self.nodes if a.get("sensitivity") in {"secret", "pii", "confidential"}
         ]
         external = [n for n, a in self.nodes if a.get("trust") == "external"]
+        anonymous = [
+            n
+            for n, a in self.nodes
+            if a.get("anonymous") is True or a.get("authentication") == "anonymous"
+        ]
+        protected = [n for n, a in self.nodes if a.get("protected") is True]
+        low_privilege = [n for n, a in self.nodes if a.get("privilege") == "low"]
+        high_privilege = [n for n, a in self.nodes if a.get("privilege") == "high"]
+        tool_output = [
+            n
+            for n, a in self.nodes
+            if a.get("kind") == NodeType.TOOL.value and a.get("produces_output", True)
+        ]
+        control_plane = [n for n, a in self.nodes if a.get("control_plane") is True]
+        rag_content = [
+            n
+            for n, a in self.nodes
+            if a.get("kind") in {NodeType.DOCUMENT.value, NodeType.RETRIEVER.value}
+        ]
+        privileged_tools = [
+            n
+            for n, a in self.nodes
+            if a.get("kind") == NodeType.TOOL.value and a.get("privileged") is True
+        ]
         tenant_nodes: dict[str, list[str]] = {}
         for node, attributes in self.nodes:
             if tenant := attributes.get("tenant"):
@@ -96,6 +126,10 @@ class SecurityGraph:
         for category, starts, ends in (
             ("UNTRUSTED_TO_PRIVILEGED", untrusted, privileged),
             ("SENSITIVE_TO_EXTERNAL", sensitive, external),
+            ("ANONYMOUS_TO_PROTECTED", anonymous, protected),
+            ("LOW_TO_HIGH_PRIVILEGE", low_privilege, high_privilege),
+            ("TOOL_OUTPUT_TO_CONTROL_PLANE", tool_output, control_plane),
+            ("RAG_CONTENT_TO_PRIVILEGED_TOOL", rag_content, privileged_tools),
         ):
             result.extend({"category": category, "path": path} for path in self.paths(starts, ends))
         tenants = sorted(tenant_nodes)

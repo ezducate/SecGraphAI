@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
@@ -223,8 +224,18 @@ class RAGDocument:
 
 
 class RAGTarget:
-    def __init__(self, retriever: Retriever) -> None:
+    def __init__(
+        self,
+        retriever: Retriever,
+        *,
+        writer: Callable[[RAGDocument], Any | Awaitable[Any]] | None = None,
+        deleter: Callable[[str, str], Any | Awaitable[Any]] | None = None,
+        configuration: dict[str, Any] | None = None,
+    ) -> None:
         self.retriever = retriever
+        self.writer = writer
+        self.deleter = deleter
+        self.configuration = dict(configuration or {})
 
     async def retrieve(self, query: str, tenant: str) -> list[RAGDocument]:
         value = self.retriever(query, tenant)
@@ -240,6 +251,20 @@ class RAGTarget:
             for document in documents
         )
 
+    async def insert(self, document: RAGDocument) -> None:
+        if self.writer is None:
+            raise RuntimeError("RAG target does not provide a safe document writer")
+        value = self.writer(document)
+        if inspect.isawaitable(value):
+            await value
+
+    async def delete(self, document_id: str, tenant: str) -> None:
+        if self.deleter is None:
+            raise RuntimeError("RAG target does not provide a safe document deleter")
+        value = self.deleter(document_id, tenant)
+        if inspect.isawaitable(value):
+            await value
+
 
 MCPTransport = Callable[[str, dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]]
 
@@ -251,18 +276,35 @@ class MCPInventory:
     resources: tuple[dict[str, Any], ...]
     prompts: tuple[dict[str, Any], ...]
 
+    def fingerprint(self) -> str:
+        payload = json.dumps(
+            {
+                "server": self.server,
+                "tools": self.tools,
+                "resources": self.resources,
+                "prompts": self.prompts,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+        return hashlib.sha256(payload).hexdigest()
+
 
 class MCPClient:
     """Transport-independent MCP metadata discovery with no tool execution."""
 
-    def __init__(self, transport: MCPTransport) -> None:
+    def __init__(self, transport: MCPTransport, *, max_response_bytes: int = 2_000_000) -> None:
         self.transport = transport
+        self.max_response_bytes = max_response_bytes
 
     async def _call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         value = self.transport(method, params or {})
         result = await value if inspect.isawaitable(value) else value
         if not isinstance(result, dict):
             raise ValueError("MCP response must be an object")
+        if len(json.dumps(result, default=str).encode()) > self.max_response_bytes:
+            raise ValueError("MCP response exceeds configured limit")
         return result
 
     async def discover(self) -> MCPInventory:

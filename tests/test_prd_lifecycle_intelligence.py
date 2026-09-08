@@ -40,7 +40,8 @@ def report():
 
 def test_finalize_hashes_and_all_text_formats(tmp_path):
     value = finalize_report(report(), configuration={"api_key": "secret"}, policies=[{"id": "p"}])
-    assert value.findings[0].fingerprint and len(value.manifest.artifact_hashes) == 5
+    assert value.findings[0].fingerprint and len(value.manifest.artifact_hashes) >= 8
+    assert value.findings[0].evidence[0].sha256
     assert "\\|" in to_markdown(value) and "SG-1" in to_csv(value) and "SG-1" in to_jsonl(value)
     for suffix in ("json", "html", "md", "csv", "jsonl", "sarif", "xml"):
         path = tmp_path / f"report.{suffix}"
@@ -72,7 +73,7 @@ def test_nvd_parsing_and_version_correlation():
         "vulnerabilities": [
             {
                 "cve": {
-                    "id": "CVE-1",
+                    "id": "CVE-2026-0001",
                     "descriptions": [{"lang": "en", "value": "issue"}],
                     "weaknesses": [{"description": [{"value": "CWE-79"}]}],
                     "metrics": {

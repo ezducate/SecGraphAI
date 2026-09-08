@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import importlib
 import json
 import os
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 
 import typer
 import yaml
@@ -18,6 +18,7 @@ from rich.table import Table
 from secgraphai.attacks import load_pack
 from secgraphai.core import Report
 from secgraphai.dashboard import create_app
+from secgraphai.discovery import discover_path, discover_url
 from secgraphai.intelligence import (
     NVDClient,
     VulnerabilityCache,
@@ -41,11 +42,12 @@ from secgraphai.plugins import audit_plugins, load_manifest
 from secgraphai.policy import PolicyEngine
 from secgraphai.reporting import save, to_json
 from secgraphai.research import draft_attack_pack
-from secgraphai.scanner import SecGraph
+from secgraphai.scanner import ScanBudget, SecGraph
 from secgraphai.schemas import write_schemas
+from secgraphai.security import Scope, redact
 from secgraphai.security import doctor as inspect_config
-from secgraphai.security import redact
 from secgraphai.self_security import run_self_audit
+from secgraphai.storage import Storage
 from secgraphai.supply_chain import inspect_artifact, inspect_model_directory
 from secgraphai.targets import discover_openapi
 
@@ -115,43 +117,104 @@ def doctor(config: Annotated[Path, typer.Option("--config", "-c")] = Path("secgr
 
 
 @app.command()
-def discover(path: Annotated[Path, typer.Argument()] = Path(".")) -> None:
-    """Safely discover decorated Python functions without importing application code."""
-    if not path.exists():
-        raise typer.BadParameter("path does not exist")
-    files = [path] if path.is_file() else list(path.rglob("*.py"))
-    counts = {"agent": 0, "tool": 0, "retriever": 0}
-    for file in files:
-        try:
-            tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
-        except (OSError, SyntaxError, UnicodeError):
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for decorator in node.decorator_list:
-                    expression = decorator.func if isinstance(decorator, ast.Call) else decorator
-                    if isinstance(expression, ast.Attribute) and expression.attr in counts:
-                        counts[expression.attr] += 1
+def discover(
+    target: Annotated[str, typer.Argument()] = ".",
+    format: Annotated[str, typer.Option("--format")] = "terminal",
+    allow_private: Annotated[bool, typer.Option("--allow-private")] = False,
+) -> None:
+    """Discover local code/manifests or an explicitly scoped OpenAPI URL."""
+    inventory = (
+        asyncio.run(discover_url(target, allow_private=allow_private))
+        if target.startswith(("http://", "https://"))
+        else discover_path(target)
+    )
+    if format == "json":
+        typer.echo(
+            json.dumps(
+                {
+                    "counts": inventory.counts(),
+                    "components": [item.__dict__ for item in inventory.components],
+                    "graph": inventory.to_graph().to_dict(),
+                },
+                default=list,
+            )
+        )
+        return
+    if format != "terminal":
+        raise typer.BadParameter("format must be terminal or json")
     table = Table("Component", "Count")
-    for key, value in counts.items():
+    for key, value in inventory.counts().items():
         table.add_row(key.title(), str(value))
     console.print(table)
 
 
 @app.command()
 def scan(
-    callback: Annotated[str, typer.Option(help="Import path module:function")],
+    callback: Annotated[str | None, typer.Option(help="Import path module:function")] = None,
+    target_url: Annotated[str | None, typer.Option("--target")] = None,
+    model: Annotated[str, typer.Option("--model")] = "target",
+    api_key_env: Annotated[str | None, typer.Option("--api-key-env")] = None,
+    profile: Annotated[str, typer.Option("--profile")] = "safe",
+    budget_usd: Annotated[float | None, typer.Option("--budget-usd")] = None,
+    max_requests: Annotated[int, typer.Option("--max-requests")] = 100,
+    max_duration: Annotated[float, typer.Option("--max-duration")] = 120,
+    allow_private: Annotated[bool, typer.Option("--allow-private")] = False,
+    dashboard: Annotated[bool, typer.Option("--dashboard")] = False,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     format: Annotated[str, typer.Option("--format")] = "terminal",
 ) -> None:
-    """Run safe deterministic checks against a local Python callback."""
-    module_name, separator, attribute = callback.partition(":")
-    if not separator:
-        raise typer.BadParameter("callback must use module:function syntax")
-    target = getattr(importlib.import_module(module_name), attribute)
-    report = SecGraph().scan_callback(target)
+    """Run bounded security checks against a callback or OpenAI-compatible target."""
+    if bool(callback) == bool(target_url):
+        raise typer.BadParameter("provide exactly one of --callback or --target")
+    budget = ScanBudget(
+        max_requests=max_requests,
+        max_duration_seconds=max_duration,
+        max_cost_usd=budget_usd,
+    )
+    modules = {
+        "safe": ["prompt-injection", "agent"],
+        "owasp-web-2025": ["api", "identity"],
+        "owasp-api-2023": ["api", "identity"],
+        "owasp-llm-2026": ["llm", "prompt-injection", "rag"],
+        "owasp-agentic-2026": ["agent", "mcp", "identity"],
+        "owasp-full": ["llm", "prompt-injection", "rag", "agent", "mcp", "api", "identity"],
+    }
+    if profile not in modules:
+        raise typer.BadParameter(f"unknown scan profile: {profile}")
+    if callback:
+        module_name, separator, attribute = callback.partition(":")
+        if not separator:
+            raise typer.BadParameter("callback must use module:function syntax")
+        target_callable = getattr(importlib.import_module(module_name), attribute)
+        report = asyncio.run(
+            SecGraph(budget=budget).scan(
+                target_callable,
+                modules=modules[profile],
+                strategy="adaptive",
+                attack_budget=max_requests,
+            )
+        )
+    else:
+        parsed = urlsplit(target_url or "")
+        target_config: dict[str, object] = {
+            "base_url": target_url,
+            "model": model,
+            "api_key_env": api_key_env,
+            "scope": {
+                "allowed_hosts": [parsed.hostname],
+                "allowed_ports": [parsed.port or (443 if parsed.scheme == "https" else 80)],
+                "blocked_networks": [] if allow_private else list(Scope().blocked_networks),
+            },
+        }
+        report = asyncio.run(
+            SecGraph(target=target_config, budget=budget).scan(
+                modules=modules[profile], strategy="adaptive", attack_budget=max_requests
+            )
+        )
+    if dashboard:
+        Storage().save(report)
     if output:
-        save(report, output, "html" if format == "html" else "json")
+        save(report, output, None if format == "terminal" else format)
         console.print(f"Saved {output}")
     elif format == "json":
         typer.echo(to_json(report))

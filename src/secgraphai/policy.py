@@ -29,6 +29,7 @@ class Rule:
     match: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     priority: int = 0
+    options: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ class PolicyEngine:
                     match=dict(item.get("match", {})),
                     reason=str(item.get("reason", "")),
                     priority=int(item.get("priority", 0)),
+                    options=dict(item.get("options", {})),
                 )
             )
         mode = str(raw.get("mode", "enforce")).lower()
@@ -90,6 +92,7 @@ class PolicyEngine:
                     rule.reason or "matched policy rule",
                     not self.shadow,
                     explanation,
+                    dict(rule.options),
                 )
         return Decision(
             self.default,

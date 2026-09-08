@@ -34,7 +34,7 @@ class Severity(StrEnum):
 
 
 class Evidence(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     kind: str
     description: str
     observed: str | None = None
@@ -47,7 +47,7 @@ class Evidence(BaseModel):
 class Interaction(BaseModel):
     """Sanitized request/response trace captured during a security test."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     test_id: str
     request: dict[str, Any] = Field(default_factory=dict)
     response: dict[str, Any] = Field(default_factory=dict)
@@ -61,7 +61,7 @@ class Interaction(BaseModel):
 class ScanManifest(BaseModel):
     """Inputs required to explain and reproduce a scan."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     schema_version: Literal["1.0"] = "1.0"
     package_version: str = "1.0.0rc1"
     target_hash: str | None = None
@@ -71,10 +71,14 @@ class ScanManifest(BaseModel):
     engine_versions: dict[str, str] = Field(default_factory=dict)
     seed: int | None = None
     artifact_hashes: dict[str, str] = Field(default_factory=dict)
+    tool_schemas: dict[str, Any] = Field(default_factory=dict)
+    retrieval_settings: dict[str, Any] = Field(default_factory=dict)
+    model_parameters: dict[str, Any] = Field(default_factory=dict)
+    environment: dict[str, str] = Field(default_factory=dict)
 
 
 class Finding(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     id: str
     title: str
     severity: Severity
@@ -95,7 +99,7 @@ class Finding(BaseModel):
 
 
 class Report(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
     scan_id: str
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     finished_at: datetime = Field(default_factory=lambda: datetime.now(UTC))

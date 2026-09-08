@@ -69,10 +69,22 @@ POLICY_SCHEMA: dict[str, Any] = {
                 "additionalProperties": False,
                 "properties": {
                     "id": {"type": "string"},
-                    "effect": {"type": "string"},
+                    "effect": {
+                        "enum": [
+                            "allow",
+                            "deny",
+                            "redact",
+                            "require_approval",
+                            "rate_limit",
+                            "sandbox",
+                            "log",
+                            "transform",
+                        ]
+                    },
                     "match": {"type": "object"},
                     "reason": {"type": "string"},
                     "priority": {"type": "integer"},
+                    "options": {"type": "object"},
                 },
             },
         },
