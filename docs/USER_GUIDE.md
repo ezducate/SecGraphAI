@@ -9,6 +9,19 @@ Use SecGraphAI only against systems you own or are authorized to assess. Start i
 `PASSIVE` or `SAFE` mode, use synthetic data, set explicit host and request limits, and
 reserve `LAB` mode for isolated test environments.
 
+Choose a workflow based on an observable application risk, not a generic prompt list:
+
+| What happened or could happen | Boundary to test | Start here |
+| --- | --- | --- |
+| An agent attempted a refund, deployment, message, or deletion without approval | Runtime tool authorization | `@secgraph.tool`, `SecurityContext`, and policy simulation |
+| Search or RAG returned another customer's data | Retriever tenant filter | `RAGSecurityModule.test_isolation` |
+| A document or tool description contained instructions for the model | Untrusted-content boundary | RAG/MCP audits plus a callback scan |
+| A user changed an object ID and accessed another tenant's resource | API authorization | API identity matrix with synthetic tokens |
+| A new model or guardrail leaked a canary that the old version blocked | Model boundary | Bounded scan, baseline comparison, and replay |
+| An MCP upgrade exposed a new privileged tool | Capability boundary | MCP inventory fingerprint and metadata audit |
+| An agent performed an external action outside the user's stated request | Intent-to-action boundary | Normalized agent event analysis |
+| A dependency alert needs prioritization | Deployment supply chain | SBOM, offline CVE cache, affected-version, and reachability checks |
+
 ## Installation
 
 Python 3.11 or newer is required.
@@ -17,11 +30,11 @@ Python 3.11 or newer is required.
 python -m pip install --pre secgraphai
 ```
 
-The current public line is the `1.0.0rc1` release candidate. `--pre` allows pip to select
+The current public line is the `1.0.0rc2` release candidate. `--pre` allows pip to select
 it before a stable release exists. For a reproducible installation, pin it explicitly:
 
 ```bash
-python -m pip install "secgraphai==1.0.0rc1"
+python -m pip install "secgraphai==1.0.0rc2"
 python -c "from importlib.metadata import version; print(version('secgraphai'))"
 ```
 
@@ -54,6 +67,10 @@ secgraph init
 secgraph doctor
 secgraph self-audit
 ```
+
+The [complete CLI reference](CLI_REFERENCE.md) documents every command, argument, option,
+default, exit behavior, and practical invocation. The scenarios below explain when to use
+those controls and what evidence to expect.
 
 `secgraph init` will not overwrite an existing configuration unless `--force` is used.
 Configuration validation rejects unknown fields and expects secret *references*, such as
@@ -151,6 +168,123 @@ are blocked by default. DNS is resolved at authorization time and again immediat
 connection; a changed address set is rejected when `require_stable_dns` is enabled. The
 CLI's `--allow-private` switch is meant for a local lab that you control; it is not a
 general bypass for production scope review. Redirects are not followed.
+
+## Annotations and runtime enforcement
+
+Annotations connect application intent to enforcement and evidence. Apply them at the
+smallest function that performs the sensitive action—not only at a top-level agent—so a
+prompt-injection or confused-deputy path cannot bypass the check by calling the tool through
+another route.
+
+| Annotation | Practical boundary | Enforced behavior |
+| --- | --- | --- |
+| `@secgraph.tool(permission="crm.read")` | CRM, payment, messaging, deployment, file, or admin operation | Rejects a context without the exact permission before the function runs |
+| `@secgraph.tool(approval=True, risk="high")` | Refund, wire, delete, publish, send, or other consequential action | Rejects a context without explicit approval; `risk` remains available to policy and analysis |
+| `@secgraph.agent(...)` | Agent or delegated worker entry point | Records agent metadata and applies supplied permission/approval metadata |
+| `@secgraph.retriever(...)` | Vector search, document search, or memory retrieval | Marks the retrieval boundary in discovery and runtime events |
+| `@secgraph.approval(when="...")` | Function that always requires an approval checkpoint | Requires the current context's approval flag |
+| `secgraph.instrument(callable)` | Existing framework or third-party callable | Records trace, duration, outcome, and safe metadata but does not itself authorize the call |
+
+### Secure a customer-support refund path
+
+Assume a support agent can look up invoices and propose refunds. The lookup requires a
+read permission. Issuing the refund requires a separate permission and human approval:
+
+```python
+from secgraphai import secgraph
+from secgraphai.runtime import PolicyDenied, SecurityContext, current_context
+
+
+@secgraph.tool(permission="billing.invoice.read", risk="customer-data")
+def get_invoice(invoice_id: str) -> dict[str, object]:
+    return billing_api.get_invoice(invoice_id)
+
+
+@secgraph.tool(permission="billing.refund", approval=True, risk="high")
+def issue_refund(invoice_id: str, amount_usd: int) -> dict[str, object]:
+    return billing_api.refund(invoice_id, amount_usd)
+
+
+def handle_refund_request(invoice_id: str, amount_usd: int) -> dict[str, object]:
+    context = SecurityContext(
+        user="support-operator-42",
+        tenant="synthetic-acme",
+        permissions=frozenset({"billing.invoice.read", "billing.refund"}),
+        approved=False,
+        trace_id="support-ticket-1842",
+    )
+    token = current_context.set(context)
+    try:
+        invoice = get_invoice(invoice_id)
+        try:
+            refund = issue_refund(invoice_id, amount_usd)
+        except PolicyDenied:
+            refund = {"status": "awaiting-human-approval"}
+        return {"invoice": invoice, "refund": refund, "security_events": context.events}
+    finally:
+        current_context.reset(token)
+```
+
+Set and reset the context at every request, message, or job boundary. Never reuse a context
+between tenants. Map permissions from an authenticated server-side identity; do not accept
+permission or approval flags from model output, retrieved text, tool arguments, or an
+untrusted client payload.
+
+`risk` and arbitrary metadata support discovery, policies, and analysis. The built-in
+`tool` decorator directly enforces `permission` and `approval`. If you need deny, redact,
+transform, sandbox, or rate-limit decisions, attach a `PolicyEngine` once at startup:
+
+```yaml
+# policy.yaml
+mode: shadow
+default: deny
+rules:
+  - id: allow-customer-read
+    effect: allow
+    priority: 100
+    match:
+      kind: tool
+      permission: billing.invoice.read
+  - id: require-refund-approval
+    effect: require_approval
+    priority: 200
+    match:
+      kind: tool
+      permission: billing.refund
+```
+
+```python
+from secgraphai import PolicyEngine, secgraph
+
+secgraph.use_policy(PolicyEngine.from_yaml("policy.yaml"))
+```
+
+Start in `shadow` mode and run `secgraph policy simulate` against representative or stored
+events. Change to `enforce` only after reviewing false positives and default-deny behavior.
+Because `secgraph` is process-global, configure its policy once during application startup.
+
+### Instrument when you cannot annotate
+
+Use adapters at framework boundaries and annotations on privileged business functions:
+
+```python
+import httpx
+from fastapi import FastAPI
+
+from secgraphai import secgraph
+
+app = FastAPI()
+fastapi_recorder = secgraph.instrument_fastapi(app)
+http = httpx.AsyncClient(event_hooks=secgraph.instrument_httpx())
+openai_client = secgraph.instrument_openai(openai_client)
+mcp_call = secgraph.instrument_mcp(mcp_call)
+chain_call = secgraph.instrument_langchain(chain_call)
+graph_call = secgraph.instrument_langgraph(graph_call)
+```
+
+Instrumentation provides traces and timing; it is not a replacement for authorization.
+Correlate its trace IDs with application audit logs while avoiding raw prompts, tokens, and
+customer data in telemetry.
 
 ## Scenario: discover an application architecture
 
@@ -706,7 +840,7 @@ and dashboard document with a Fernet key held only in an environment variable. I
 prune expired evidence at startup:
 
 ```powershell
-pip install "secgraphai[dashboard,security]"
+python -m pip install --pre "secgraphai[dashboard,security]"
 $env:SECGRAPH_STORAGE_KEY = "<url-safe Fernet key>"
 secgraph serve --database secgraph.db `
   --encryption-key-env SECGRAPH_STORAGE_KEY `
@@ -724,7 +858,7 @@ Install the dashboard extra, choose a strong token of at least 16 characters, an
 loopback:
 
 ```bash
-pip install "secgraphai[dashboard]"
+python -m pip install --pre "secgraphai[dashboard]"
 export SECGRAPH_DASHBOARD_TOKEN="replace-with-a-long-random-value"
 secgraph serve --host 127.0.0.1 --port 8777 --database secgraph.db
 ```
@@ -795,7 +929,7 @@ a remediation removes a finding without breaking the test harness.
 
 ## Current release-candidate boundaries
 
-SecGraphAI 1.0.0rc1 provides the executable core described in the PRD, but some activities
+SecGraphAI 1.0.0rc2 provides the executable core described in the PRD, but some activities
 remain release or integration responsibilities:
 
 - framework-specific live inventory beyond built-in FastAPI-style route, static Python,

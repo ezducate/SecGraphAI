@@ -15,7 +15,7 @@ publishing. Maintainers do not create or store a PyPI API token in GitHub.
 ## Publish a release candidate
 
 1. Confirm the version in `pyproject.toml` and the package version recorded in generated
-   manifests agree. The tag must be `v` followed by that version, such as `v1.0.0rc1`.
+   manifests agree. The tag must be `v` followed by that version, such as `v1.0.0rc2`.
 2. Run the full test, lint, type, dependency-audit, security, build, and wheel-install checks.
 3. Confirm CI and Deep security pass on the exact commit being released.
 4. Create a GitHub prerelease from that commit. Publishing the GitHub release triggers
@@ -32,7 +32,7 @@ increment the version, and publish a new tag rather than trying to replace an ar
 Use a clean virtual environment and the public index, not the repository checkout:
 
 ```bash
-python -m pip install --index-url https://pypi.org/simple "secgraphai==1.0.0rc1"
+python -m pip install --index-url https://pypi.org/simple "secgraphai==1.0.0rc2"
 python -c "from importlib.metadata import version; print(version('secgraphai'))"
 secgraph --help
 secgraph doctor

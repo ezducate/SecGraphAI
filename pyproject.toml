@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "secgraphai"
-version = "1.0.0rc1"
+version = "1.0.0rc2"
 description = "Security testing for systems that think and act"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -70,6 +70,8 @@ secgraph = "secgraphai.cli:app"
 
 [project.urls]
 Repository = "https://github.com/ezducate/SecGraphAI"
+Documentation = "https://github.com/ezducate/SecGraphAI/blob/main/docs/USER_GUIDE.md"
+Changelog = "https://github.com/ezducate/SecGraphAI/blob/main/CHANGELOG.md"
 Issues = "https://github.com/ezducate/SecGraphAI/security/advisories/new"
 
 [tool.hatch.build.targets.wheel]

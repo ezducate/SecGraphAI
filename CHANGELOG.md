@@ -5,6 +5,14 @@ Versioning and the format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.0.0rc2] - 2026-09-07
+
+- Reworked the PyPI project page into a scenario-driven guide for real application threats.
+- Expanded annotation guidance for permission, approval, policy, context, and instrumentation boundaries.
+- Added a complete CLI reference covering every command, argument, option, default, and security gate.
+- Added practical workflows for unauthorized refunds, poisoned RAG, cross-tenant API access,
+  MCP capability drift, excessive agent behavior, model scanning, and CI regression replay.
+
 - Enforced PASSIVE, SAFE, LAB, and CUSTOM request modes and recorded finding reproduction inputs.
 - Added executable replay verification, persisted dashboard scan jobs, and authenticated live events.
 - Added four independent model roles, boundary-progress adaptive search, and a package-driven

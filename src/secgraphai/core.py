@@ -73,7 +73,7 @@ class ScanManifest(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     schema_version: Literal["1.0"] = "1.0"
-    package_version: str = "1.0.0rc1"
+    package_version: str = "1.0.0rc2"
     target_hash: str | None = None
     config_hash: str | None = None
     policy_hash: str | None = None
