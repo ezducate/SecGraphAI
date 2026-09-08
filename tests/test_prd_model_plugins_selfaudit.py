@@ -1,0 +1,88 @@
+from __future__ import annotations
+
+import json
+import sys
+
+import pytest
+import respx
+from httpx import Response
+
+from secgraphai.attacks import AttackPack, PackTrust
+from secgraphai.model import Model, ModelError
+from secgraphai.plugins import PluginManifest, PluginMode, audit_plugins, load_manifest, run_plugin
+from secgraphai.self_security import (
+    AuditStatus,
+    dependency_audit,
+    package_integrity,
+    permissions_check,
+    run_self_audit,
+)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_model_success_env_repr_and_failures(monkeypatch):
+    monkeypatch.setenv("MODEL_KEY", "secret")
+    model = Model(base_url="https://model.test/v1", model="x", api_key_env="MODEL_KEY")
+    route = respx.post("https://model.test/v1/chat/completions")
+    route.mock(return_value=Response(200, json={"choices": [{"message": {"content": "ok"}}]}))
+    assert await model.complete([{"role": "user", "content": "x"}]) == "ok"
+    assert "secret" not in repr(model)
+    route.mock(return_value=Response(200, json={"invalid": True}))
+    with pytest.raises(ModelError, match="invalid"):
+        await model.complete([])
+    route.mock(return_value=Response(500))
+    with pytest.raises(ModelError, match="HTTPStatusError"):
+        await model.complete([])
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_model_response_size_limit():
+    model = Model(base_url="https://model.test", model="x", max_response_bytes=2)
+    respx.post("https://model.test/chat/completions").mock(
+        return_value=Response(200, content=b"long")
+    )
+    with pytest.raises(ModelError, match="size limit"):
+        await model.complete([])
+
+
+def test_plugin_runner_permissions_schema_and_manifest(tmp_path):
+    script = tmp_path / "plugin.py"
+    script.write_text(
+        "import json,sys\ndata=json.load(sys.stdin)\nprint(json.dumps({'findings': [], 'seen': bool(data)}))\n"
+    )
+    manifest = PluginManifest(
+        "test",
+        ("python", str(script)),
+        frozenset({"scan"}),
+        output_schema={"required": ["findings"]},
+    )
+    assert run_plugin(manifest, {"x": 1}, allowed_permissions={"scan"})["seen"]
+    with pytest.raises(PermissionError):
+        run_plugin(manifest, {}, allowed_permissions=set())
+    with pytest.raises(PermissionError):
+        run_plugin(PluginManifest("x", (sys.executable,)), {})
+    path = tmp_path / "plugin.json"
+    path.write_text(json.dumps({"name": "test", "command": ["python"], "mode": "subprocess"}))
+    assert load_manifest(path).name == "test"
+
+
+def test_plugin_audit_catches_trust_and_credentials():
+    manifest = PluginManifest(
+        "x", ("python",), frozenset({"credentials.raw"}), mode=PluginMode.IN_PROCESS
+    )
+    problems = audit_plugins([manifest, manifest])
+    assert len(problems) >= 4
+
+
+def test_self_audit_components(tmp_path, monkeypatch):
+    assert package_integrity().status in {AuditStatus.PASS, AuditStatus.WARN}
+    assert dependency_audit(False).status == AuditStatus.WARN
+    assert permissions_check(None, "x").status == AuditStatus.NA
+    report = run_self_audit(
+        config={"scope": {"allowed_hosts": ["localhost"], "max_total_requests": 1}},
+        database=tmp_path / "missing",
+        packs=[AttackPack("x", "1", "x", "1", (), PackTrust.UNVERIFIED_COMMUNITY)],
+    )
+    assert not report.passed and report.metadata["audit_sha256"]

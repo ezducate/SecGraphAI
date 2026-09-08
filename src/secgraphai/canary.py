@@ -28,3 +28,14 @@ class CanaryFactory:
     def record(self, *, tenant: str) -> Canary:
         return self._make("record", tenant)
 
+    def document(self, *, tenant: str) -> Canary:
+        return self._make("document", tenant)
+
+    def identifier(self, *, tenant: str | None = None) -> Canary:
+        return self._make("id", tenant)
+
+    def memory(self, *, tenant: str | None = None) -> Canary:
+        return self._make("memory", tenant)
+
+    def tool_result(self, *, tenant: str | None = None) -> Canary:
+        return self._make("tool", tenant)

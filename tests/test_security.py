@@ -17,4 +17,3 @@ def test_scope_requires_allowlist():
 def test_doctor_finds_remote_unauthenticated_dashboard_and_secret():
     issues = doctor({"api_key": "bad", "scope": {}, "dashboard": {"host": "0.0.0.0"}})
     assert len(issues) == 4
-

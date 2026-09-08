@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class Verdict(StrEnum):
-    PASS = "PASS"
+    # Public verdict label, not a credential.
+    PASS = "PASS"  # noqa: S105  # nosec B105
     VERIFIED_VIOLATION = "VERIFIED_VIOLATION"
     LIKELY_VIOLATION = "LIKELY_VIOLATION"
     BLOCKED_BY_CONTROL = "BLOCKED_BY_CONTROL"
@@ -61,7 +63,7 @@ class ScanManifest(BaseModel):
 
     model_config = ConfigDict(frozen=True)
     schema_version: Literal["1.0"] = "1.0"
-    package_version: str = "1.0.0"
+    package_version: str = "1.0.0rc1"
     target_hash: str | None = None
     config_hash: str | None = None
     policy_hash: str | None = None
@@ -111,3 +113,9 @@ class Report(BaseModel):
         # Errors may also have a corresponding finding; count each failed test once.
         result[Verdict.TEST_ERROR.value] = max(result[Verdict.TEST_ERROR.value], len(self.errors))
         return result
+
+    def save(self, path: str | Path, format: str | None = None) -> None:
+        """Save using the safe report renderer selected by the file extension."""
+        from secgraphai.reporting import save
+
+        save(self, path, format)

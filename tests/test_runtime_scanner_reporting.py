@@ -36,7 +36,8 @@ def test_scanner_detects_canary_and_preserves_errors():
 
 
 def test_html_escapes_target_controlled_content():
-    report = asyncio.run(SecGraph().scan(lambda prompt: prompt, prompts=["<script>alert(1)</script>"]))
+    report = asyncio.run(
+        SecGraph().scan(lambda prompt: prompt, prompts=["<script>alert(1)</script>"])
+    )
     rendered = to_html(report)
     assert "<script>" not in rendered
-

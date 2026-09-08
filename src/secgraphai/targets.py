@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from itertools import product
 import inspect
 import json
 import os
 import time
-from typing import Any, Awaitable, Callable, Iterable, Protocol
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import dataclass, field
+from itertools import product
+from typing import Any
 
 import httpx
 
@@ -35,8 +36,14 @@ def discover_openapi(document: dict[str, Any]) -> list[Endpoint]:
             if method.lower() not in {"get", "put", "post", "delete", "patch", "head", "options"}:
                 continue
             operation = operation if isinstance(operation, dict) else {}
-            endpoints.append(Endpoint(method.upper(), path, operation.get("operationId"),
-                                      _security_names(operation.get("security", global_security))))
+            endpoints.append(
+                Endpoint(
+                    method.upper(),
+                    path,
+                    operation.get("operationId"),
+                    _security_names(operation.get("security", global_security)),
+                )
+            )
     return endpoints
 
 
@@ -65,12 +72,19 @@ class IdentityCase:
     expected_status: frozenset[int]
 
 
-def identity_matrix(identities: Iterable[Identity], endpoints: Iterable[Endpoint],
-                    authorize: Callable[[Identity, Endpoint], bool]) -> list[IdentityCase]:
-    return [IdentityCase(identity, endpoint,
-                         frozenset({200, 201, 204}) if authorize(identity, endpoint)
-                         else frozenset({401, 403}))
-            for identity, endpoint in product(identities, endpoints)]
+def identity_matrix(
+    identities: Iterable[Identity],
+    endpoints: Iterable[Endpoint],
+    authorize: Callable[[Identity, Endpoint], bool],
+) -> list[IdentityCase]:
+    return [
+        IdentityCase(
+            identity,
+            endpoint,
+            frozenset({200, 201, 204}) if authorize(identity, endpoint) else frozenset({401, 403}),
+        )
+        for identity, endpoint in product(identities, endpoints)
+    ]
 
 
 @dataclass
@@ -112,6 +126,15 @@ def schemathesis_cases(schema: dict[str, Any]) -> list[dict[str, str]]:
     return [{"method": item.method, "path": item.path} for item in discover_openapi(schema)]
 
 
+def load_schemathesis_schema(schema: dict[str, Any]) -> Any:
+    """Load an in-memory OpenAPI document through the optional Schemathesis engine."""
+    try:
+        import schemathesis  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError("Schemathesis integration requires the integrations extra") from exc
+    return schemathesis.openapi.from_dict(schema)
+
+
 @dataclass(frozen=True)
 class TargetResponse:
     status_code: int
@@ -126,41 +149,64 @@ class TargetResponse:
 class APITarget:
     """Bounded HTTP target that enforces scope before every request."""
 
-    def __init__(self, base_url: str, *, scope_guard: ScopeGuard,
-                 timeout: float = 20, max_response_bytes: int = 2_000_000,
-                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        scope_guard: ScopeGuard,
+        timeout: float = 20,
+        max_response_bytes: int = 2_000_000,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.scope_guard = scope_guard
         self.timeout = timeout
         self.max_response_bytes = max_response_bytes
         self.transport = transport
 
-    async def request(self, method: str, path: str, *, identity: Identity | None = None,
-                      json_body: Any = None, headers: dict[str, str] | None = None) -> TargetResponse:
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        identity: Identity | None = None,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> TargetResponse:
         url = f"{self.base_url}/{path.lstrip('/')}"
         self.scope_guard.authorize(url)
         request_headers = dict(headers or {})
         if identity and identity.authorization():
             request_headers["Authorization"] = identity.authorization() or ""
         started = time.perf_counter()
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False,
-                                     transport=self.transport) as client:
-            async with client.stream(method, url, json=json_body,
-                                     headers=request_headers) as response:
+        async with httpx.AsyncClient(
+            timeout=self.timeout, follow_redirects=False, transport=self.transport
+        ) as client:
+            async with client.stream(
+                method, url, json=json_body, headers=request_headers
+            ) as response:
                 chunks, size = [], 0
                 async for chunk in response.aiter_bytes():
                     size += len(chunk)
                     if size > self.max_response_bytes:
                         raise ValueError("target response exceeds configured limit")
                     chunks.append(chunk)
-        return TargetResponse(response.status_code, b"".join(chunks).decode("utf-8", "replace"),
-                              dict(response.headers), (time.perf_counter() - started) * 1000)
+        return TargetResponse(
+            response.status_code,
+            b"".join(chunks).decode("utf-8", "replace"),
+            dict(response.headers),
+            (time.perf_counter() - started) * 1000,
+        )
 
 
-async def execute_identity_matrix(target: APITarget, cases: Iterable[IdentityCase]) -> list[tuple[IdentityCase, TargetResponse]]:
+async def execute_identity_matrix(
+    target: APITarget, cases: Iterable[IdentityCase]
+) -> list[tuple[IdentityCase, TargetResponse]]:
     results = []
     for case in cases:
-        response = await target.request(case.endpoint.method, case.endpoint.path, identity=case.identity)
+        response = await target.request(
+            case.endpoint.method, case.endpoint.path, identity=case.identity
+        )
         results.append((case, response))
     return results
 
@@ -189,8 +235,10 @@ class RAGTarget:
     async def cross_tenant_probe(self, requesting_tenant: str, other_tenant: str) -> bool:
         probe = RAGProbe(other_tenant)
         documents = await self.retrieve(probe.canary, requesting_tenant)
-        return any(document.tenant != requesting_tenant or probe.canary in document.text
-                   for document in documents)
+        return any(
+            document.tenant != requesting_tenant or probe.canary in document.text
+            for document in documents
+        )
 
 
 MCPTransport = Callable[[str, dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]]

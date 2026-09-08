@@ -8,8 +8,18 @@ def test_error_is_never_pass():
 
 
 def test_models_are_immutable():
-    finding = Finding(id="SG-1", title="x", severity=Severity.HIGH,
-                      verdict=Verdict.VERIFIED_VIOLATION, confidence=1,
-                      evidence=[Evidence(kind="canary", description="observed")])
+    finding = Finding(
+        id="SG-1",
+        title="x",
+        severity=Severity.HIGH,
+        verdict=Verdict.VERIFIED_VIOLATION,
+        confidence=1,
+        evidence=[Evidence(kind="canary", description="observed")],
+    )
     assert finding.verdict is Verdict.VERIFIED_VIOLATION
 
+
+def test_report_save_uses_extension(tmp_path):
+    target = tmp_path / "report.json"
+    Report(scan_id="scan").save(target)
+    assert '"scan_id": "scan"' in target.read_text()

@@ -24,10 +24,16 @@ class ScopeConfig(BaseModel):
     max_requests_per_second: float = Field(default=5, gt=0, le=10_000)
     max_duration_seconds: float = Field(default=120, gt=0, le=86_400)
     prohibit: list[str] = Field(default_factory=lambda: ["destructive_write", "account_deletion"])
-    blocked_networks: list[str] = Field(default_factory=lambda: [
-        "0.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "224.0.0.0/4",
-        "::1/128", "fe80::/10",
-    ])
+    blocked_networks: list[str] = Field(
+        default_factory=lambda: [
+            "0.0.0.0/8",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "224.0.0.0/4",
+            "::1/128",
+            "fe80::/10",
+        ]
+    )
 
 
 class BudgetConfig(BaseModel):
@@ -67,6 +73,6 @@ class Config(BaseModel):
     seed: int = 0
 
     @classmethod
-    def load(cls, path: str | Path) -> "Config":
+    def load(cls, path: str | Path) -> Config:
         raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         return cls.model_validate(raw or {})

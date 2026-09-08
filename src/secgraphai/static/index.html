@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SecGraphAI</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <aside>
+    <h1>SecGraphAI</h1>
+    <nav aria-label="Security areas">
+      <button data-view="overview">Overview</button><button data-view="targets">Targets</button>
+      <button data-view="architecture">Architecture</button><button data-view="attack-paths">Attack Graph</button>
+      <button data-view="scans">Scans</button><button data-view="findings">Findings</button>
+      <button data-view="prompt-injection">Prompt Injection</button><button data-view="agents">Agents</button>
+      <button data-view="rag">RAG</button><button data-view="mcp">MCP</button>
+      <button data-view="api-security">API Security</button><button data-view="identities">Identities</button>
+      <button data-view="runtime">Runtime</button><button data-view="policies">Policies</button>
+      <button data-view="reports">Reports</button><button data-view="vulnerabilities">Vulnerabilities</button>
+      <button data-view="owasp">OWASP Coverage</button><button data-view="self-audit">Self Security</button>
+    </nav>
+  </aside>
+  <main>
+    <header><div><p class="eyebrow">LOCAL SECURITY CONSOLE</p><h2 id="title">Overview</h2></div>
+      <span id="status" class="badge">Checking service…</span></header>
+    <section class="cards" aria-label="Summary">
+      <article><span>Scans</span><strong id="scan-count">—</strong></article>
+      <article><span>Findings</span><strong id="finding-count">—</strong></article>
+      <article><span>Verified</span><strong id="verified-count">—</strong></article>
+      <article><span>Test errors</span><strong id="error-count">—</strong></article>
+    </section>
+    <section class="panel"><h3 id="panel-title">Recent security activity</h3>
+      <p id="message">Enter the dashboard token in this browser session to load protected data.</p>
+      <label>Bearer token <input id="token" type="password" autocomplete="off"><button id="connect">Connect</button></label>
+      <pre id="content" aria-live="polite"></pre>
+    </section>
+  </main>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

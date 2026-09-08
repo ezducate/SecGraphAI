@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib
 import json
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -13,28 +15,83 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
-from secgraphai.reporting import save, to_json
+from secgraphai.attacks import load_pack
 from secgraphai.core import Report
-from secgraphai.intelligence import VulnerabilityCache
-from secgraphai.lifecycle import diff_reports
-from secgraphai.targets import discover_openapi
+from secgraphai.dashboard import create_app
+from secgraphai.intelligence import (
+    NVDClient,
+    VulnerabilityCache,
+    affected,
+    generate_cyclonedx,
+    generate_spdx,
+    installed_components,
+    parse_cyclonedx,
+    parse_spdx,
+    security_gate,
+)
+from secgraphai.lifecycle import (
+    BaselineStore,
+    diff_reports,
+    load_replay,
+    regression_bundle,
+    save_replay,
+)
+from secgraphai.multimodal import inspect_media
+from secgraphai.plugins import audit_plugins, load_manifest
+from secgraphai.policy import PolicyEngine
+from secgraphai.reporting import save, to_json
+from secgraphai.research import draft_attack_pack
 from secgraphai.scanner import SecGraph
+from secgraphai.schemas import write_schemas
 from secgraphai.security import doctor as inspect_config
 from secgraphai.security import redact
+from secgraphai.self_security import run_self_audit
+from secgraphai.supply_chain import inspect_artifact, inspect_model_directory
+from secgraphai.targets import discover_openapi
 
 app = typer.Typer(help="Security testing for systems that think and act.", no_args_is_help=True)
 console = Console()
+policy_app = typer.Typer(help="Test and simulate runtime policies.")
+baseline_app = typer.Typer(help="Manage security baselines.")
+bundle_app = typer.Typer(help="Create and inspect safe replay bundles.")
+report_app = typer.Typer(help="Render stored security reports.")
+cve_app = typer.Typer(help="Search and synchronize vulnerability intelligence.")
+sbom_app = typer.Typer(help="Generate and inspect software bills of materials.")
+pack_app = typer.Typer(help="Inspect signed attack packs.")
+plugin_app = typer.Typer(help="Audit external plugins.")
+research_app = typer.Typer(help="Import security research as disabled draft packs.")
+model_app = typer.Typer(help="Inspect model supply-chain artifacts.")
+app.add_typer(policy_app, name="policy")
+app.add_typer(baseline_app, name="baseline")
+app.add_typer(bundle_app, name="bundle")
+app.add_typer(report_app, name="report")
+app.add_typer(cve_app, name="cve")
+app.add_typer(sbom_app, name="sbom")
+app.add_typer(pack_app, name="packs")
+app.add_typer(plugin_app, name="plugins")
+app.add_typer(research_app, name="research")
+app.add_typer(model_app, name="model")
 
-_STARTER = {"mode": "SAFE", "scope": {"allowed_hosts": ["localhost"],
-    "allowed_ports": [8000], "max_total_requests": 100}, "invariants": [{
-        "id": "NO_SECRET_EXFIL", "description": "Secrets must not reach external destinations",
-        "source": {"sensitivity": "secret"}, "destination": {"trust": "external"},
-        "expected": "deny"}]}
+_STARTER = {
+    "mode": "SAFE",
+    "scope": {"allowed_hosts": ["localhost"], "allowed_ports": [8000], "max_total_requests": 100},
+    "invariants": [
+        {
+            "id": "NO_SECRET_EXFIL",
+            "description": "Secrets must not reach external destinations",
+            "source": {"sensitivity": "secret"},
+            "destination": {"trust": "external"},
+            "expected": "deny",
+        }
+    ],
+}
 
 
 @app.command("init")
-def initialize(path: Annotated[Path, typer.Argument()] = Path("secgraph.yaml"),
-               force: Annotated[bool, typer.Option("--force")] = False) -> None:
+def initialize(
+    path: Annotated[Path, typer.Argument()] = Path("secgraph.yaml"),
+    force: Annotated[bool, typer.Option("--force")] = False,
+) -> None:
     """Create a safe starter configuration."""
     if path.exists() and not force:
         raise typer.BadParameter(f"{path} exists; use --force to replace it")
@@ -82,9 +139,11 @@ def discover(path: Annotated[Path, typer.Argument()] = Path(".")) -> None:
 
 
 @app.command()
-def scan(callback: Annotated[str, typer.Option(help="Import path module:function")],
-         output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
-         format: Annotated[str, typer.Option("--format")] = "terminal") -> None:
+def scan(
+    callback: Annotated[str, typer.Option(help="Import path module:function")],
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+    format: Annotated[str, typer.Option("--format")] = "terminal",
+) -> None:
     """Run safe deterministic checks against a local Python callback."""
     module_name, separator, attribute = callback.partition(":")
     if not separator:
@@ -103,35 +162,314 @@ def scan(callback: Annotated[str, typer.Option(help="Import path module:function
 
 
 @app.command("self-audit")
-def self_audit() -> None:
+def self_audit(
+    deep: Annotated[bool, typer.Option("--deep")] = False,
+    config: Annotated[Path | None, typer.Option("--config", "-c")] = None,
+    database: Annotated[Path | None, typer.Option("--database")] = None,
+) -> None:
     """Run built-in installation safety checks."""
-    sample = {"api_key": "do-not-print"}
-    result = {"package_import": "pass",
-              "secret_redaction": "pass" if redact(sample)["api_key"] == "[REDACTED]" else "fail",
-              "error_is_pass": False, "safe_yaml": True, "scope_default_deny": True}
-    typer.echo(json.dumps(result, sort_keys=True))
+    raw = yaml.safe_load(config.read_text(encoding="utf-8")) if config and config.exists() else None
+    result = run_self_audit(config=raw, config_path=config, database=database, deep=deep)
+    typer.echo(json.dumps(result.as_dict(), sort_keys=True, default=str))
+    if not result.passed:
+        raise typer.Exit(1)
 
 
 @app.command("openapi")
 def openapi(path: Annotated[Path, typer.Argument()]) -> None:
     """Discover operations from a local OpenAPI JSON/YAML document."""
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    typer.echo(json.dumps([endpoint.__dict__ for endpoint in discover_openapi(document)], default=list))
+    typer.echo(
+        json.dumps([endpoint.__dict__ for endpoint in discover_openapi(document)], default=list)
+    )
 
 
 @app.command("diff")
 def diff(old: Annotated[Path, typer.Argument()], new: Annotated[Path, typer.Argument()]) -> None:
     """Compare two report baselines using stable finding fingerprints."""
-    result = diff_reports(Report.model_validate_json(old.read_text()),
-                          Report.model_validate_json(new.read_text()))
+    result = diff_reports(
+        Report.model_validate_json(old.read_text()), Report.model_validate_json(new.read_text())
+    )
     typer.echo(json.dumps({key: [item.id for item in value] for key, value in result.items()}))
 
 
-@app.command("cve")
-def cve(query: Annotated[str, typer.Argument()],
-        cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json")) -> None:
-    """Search the offline vulnerability cache."""
-    typer.echo(json.dumps([item.__dict__ for item in VulnerabilityCache(cache).search(query)], default=list))
+@app.command("test")
+def test_command(
+    callback: Annotated[str, typer.Option(help="Import path module:function")],
+) -> None:
+    """Run the deterministic callback security test suite."""
+    scan(callback=callback, output=None, format="terminal")
+
+
+@app.command("compare")
+def compare(old: Annotated[Path, typer.Argument()], new: Annotated[Path, typer.Argument()]) -> None:
+    """Compare application, model, guardrail, or policy scan results."""
+    diff(old, new)
+
+
+@app.command("replay")
+def replay(path: Annotated[Path, typer.Argument()]) -> None:
+    """Validate and inspect a safe replay bundle."""
+    report, inputs = load_replay(path)
+    typer.echo(
+        json.dumps(
+            {"scan_id": report.scan_id, "summary": report.summary(), "inputs": redact(inputs)},
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("generate-test")
+def generate_test(
+    report_path: Annotated[Path, typer.Argument()],
+    finding_id: Annotated[str, typer.Argument()],
+    output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
+) -> None:
+    """Generate pytest, YAML, and CI regression artifacts for a finding."""
+    report = Report.model_validate_json(report_path.read_text(encoding="utf-8"))
+    finding = next((item for item in report.findings if item.id == finding_id), None)
+    if finding is None:
+        raise typer.BadParameter("finding not present in report")
+    bundle = regression_bundle(finding)
+    if output:
+        output.write_text(bundle["pytest"], encoding="utf-8")
+    else:
+        typer.echo(json.dumps(bundle, indent=2))
+
+
+@app.command("serve")
+def serve(
+    database: Annotated[Path, typer.Option("--database")] = Path("secgraph.db"),
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port")] = 8777,
+    token_env: Annotated[str, typer.Option("--token-env")] = "SECGRAPH_DASHBOARD_TOKEN",  # noqa: S107
+) -> None:  # nosec B107
+    """Start the authenticated local dashboard API."""
+    token = os.environ.get(token_env)
+    if not token:
+        raise typer.BadParameter(f"set {token_env} to a strong dashboard token")
+    import uvicorn
+
+    uvicorn.run(create_app(database=database, token=token, bind_host=host), host=host, port=port)
+
+
+@app.command("dev")
+def dev(
+    database: Annotated[Path, typer.Option("--database")] = Path("secgraph.db"),
+    port: Annotated[int, typer.Option("--port")] = 8777,
+) -> None:
+    """Start the local dashboard using the configured environment token."""
+    serve(
+        database=database,
+        host="127.0.0.1",
+        port=port,
+        token_env="SECGRAPH_DASHBOARD_TOKEN",  # noqa: S106  # nosec B106
+    )
+
+
+@app.command("engines")
+def engines() -> None:
+    from secgraphai.adapters import SUPPORTED_ENGINES
+
+    typer.echo("\n".join(sorted(SUPPORTED_ENGINES)))
+
+
+@policy_app.command("test")
+def policy_test(
+    path: Annotated[Path, typer.Argument()], event: Annotated[str, typer.Option("--event")] = "{}"
+) -> None:
+    decision = PolicyEngine.from_yaml(path).evaluate(json.loads(event))
+    typer.echo(json.dumps(decision.__dict__, default=str, sort_keys=True))
+
+
+@policy_app.command("simulate")
+def policy_simulate(
+    path: Annotated[Path, typer.Argument()], events: Annotated[Path, typer.Argument()]
+) -> None:
+    raw = json.loads(events.read_text(encoding="utf-8"))
+    summary = PolicyEngine.from_yaml(path).summarize(raw)
+    typer.echo(json.dumps(summary.__dict__, default=str, sort_keys=True))
+
+
+@baseline_app.command("create")
+def baseline_create(
+    name: Annotated[str, typer.Argument()],
+    report: Annotated[Path, typer.Argument()],
+    root: Annotated[Path, typer.Option("--root")] = Path(".secgraph/baselines"),
+) -> None:
+    target = BaselineStore(root).save(
+        name, Report.model_validate_json(report.read_text(encoding="utf-8"))
+    )
+    typer.echo(str(target))
+
+
+@baseline_app.command("compare")
+def baseline_compare(
+    name: Annotated[str, typer.Argument()],
+    report: Annotated[Path, typer.Argument()],
+    root: Annotated[Path, typer.Option("--root")] = Path(".secgraph/baselines"),
+) -> None:
+    result = diff_reports(
+        BaselineStore(root).load(name),
+        Report.model_validate_json(report.read_text(encoding="utf-8")),
+    )
+    typer.echo(json.dumps({key: [item.id for item in value] for key, value in result.items()}))
+
+
+@bundle_app.command("create")
+def bundle_create(
+    report: Annotated[Path, typer.Argument()], output: Annotated[Path, typer.Argument()]
+) -> None:
+    save_replay(Report.model_validate_json(report.read_text(encoding="utf-8")), output, {})
+
+
+@bundle_app.command("replay")
+def bundle_replay(path: Annotated[Path, typer.Argument()]) -> None:
+    replay(path)
+
+
+@report_app.command("render")
+def report_render(
+    report: Annotated[Path, typer.Argument()],
+    output: Annotated[Path, typer.Argument()],
+    format: Annotated[str | None, typer.Option("--format")] = None,
+) -> None:
+    save(Report.model_validate_json(report.read_text(encoding="utf-8")), output, format)
+
+
+@cve_app.command("search")
+def cve_search(
+    query: Annotated[str, typer.Argument()],
+    cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json"),
+) -> None:
+    typer.echo(
+        json.dumps(
+            [item.__dict__ for item in VulnerabilityCache(cache).search(query)], default=list
+        )
+    )
+
+
+@cve_app.command("show")
+def cve_show(
+    identifier: Annotated[str, typer.Argument()],
+    cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json"),
+) -> None:
+    matches = VulnerabilityCache(cache).search(identifier)
+    typer.echo(
+        json.dumps(
+            next((item.__dict__ for item in matches if item.id == identifier), {}), default=list
+        )
+    )
+
+
+@cve_app.command("sync")
+def cve_sync(
+    query: Annotated[str, typer.Option("--query")] = "Python",
+    cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json"),
+) -> None:
+    values = asyncio.run(NVDClient().search(query))
+    VulnerabilityCache(cache).save(values)
+    typer.echo(f"Saved {len(values)} records")
+
+
+@cve_app.command("affected")
+def cve_affected(
+    component: Annotated[str, typer.Argument()],
+    version: Annotated[str, typer.Argument()],
+    cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json"),
+) -> None:
+    from secgraphai.intelligence import Component
+
+    matches = [
+        item.id
+        for item in VulnerabilityCache(cache).search(component)
+        if affected(Component(component, version), item) is not False
+    ]
+    typer.echo(json.dumps(matches))
+
+
+@cve_app.command("reachable")
+def cve_reachable(cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json")) -> None:
+    matches = [item.__dict__ for item in VulnerabilityCache(cache).search("") if item.reachable]
+    typer.echo(json.dumps(matches, default=list))
+
+
+@sbom_app.command("generate")
+def sbom_generate(
+    output: Annotated[Path, typer.Option("--output", "-o")] = Path("bom.json"),
+    format: Annotated[str, typer.Option("--format")] = "cyclonedx",
+) -> None:
+    if format not in {"cyclonedx", "spdx"}:
+        raise typer.BadParameter("format must be cyclonedx or spdx")
+    generator = generate_spdx if format == "spdx" else generate_cyclonedx
+    output.write_text(json.dumps(generator(installed_components()), indent=2), encoding="utf-8")
+
+
+@sbom_app.command("scan")
+def sbom_scan(
+    path: Annotated[Path, typer.Argument()],
+    cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json"),
+) -> None:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    components = parse_spdx(document) if document.get("spdxVersion") else parse_cyclonedx(document)
+    vulnerabilities = [
+        item
+        for component in components
+        for item in VulnerabilityCache(cache).search(component.name)
+        if affected(component, item) is not False
+    ]
+    passed, reasons = security_gate(vulnerabilities)
+    typer.echo(json.dumps({"passed": passed, "reasons": reasons}))
+    if not passed:
+        raise typer.Exit(1)
+
+
+@pack_app.command("verify")
+def pack_verify(
+    path: Annotated[Path, typer.Argument()],
+    allow_unverified: Annotated[bool, typer.Option("--allow-unverified")] = False,
+) -> None:
+    pack = load_pack(path, allow_unverified=allow_unverified)
+    typer.echo(json.dumps({"id": pack.id, "version": pack.version, "trust": pack.trust.value}))
+
+
+@plugin_app.command("audit")
+def plugin_audit(paths: Annotated[list[Path], typer.Argument()]) -> None:
+    problems = audit_plugins(load_manifest(path) for path in paths)
+    typer.echo(json.dumps(problems))
+    if problems:
+        raise typer.Exit(1)
+
+
+@research_app.command("import")
+def research_import(
+    path: Annotated[Path, typer.Argument()],
+    output: Annotated[Path, typer.Option("--output", "-o")] = Path("draft-pack.json"),
+) -> None:
+    pack, review = draft_attack_pack(path)
+    output.write_text(
+        json.dumps({**pack.payload(), "trust": pack.trust.value, "review": review}, indent=2),
+        encoding="utf-8",
+    )
+    typer.echo(f"Created disabled draft {output}; human review is required")
+
+
+@model_app.command("inspect")
+def model_inspect(path: Annotated[Path, typer.Argument()]) -> None:
+    values = inspect_model_directory(path) if path.is_dir() else [inspect_artifact(path)]
+    typer.echo(json.dumps([item.__dict__ for item in values], indent=2, default=str))
+
+
+@app.command("media")
+def media_inspect(path: Annotated[Path, typer.Argument()]) -> None:
+    """Inspect a bounded image, document, PDF, audio transcript, or web artifact."""
+    typer.echo(json.dumps(inspect_media(path).__dict__, indent=2))
+
+
+@app.command("schemas")
+def schemas(output: Annotated[Path, typer.Option("--output", "-o")] = Path("schemas")) -> None:
+    """Export the stable public report, attack-pack, and policy schemas."""
+    typer.echo("\n".join(str(path) for path in write_schemas(output)))
 
 
 if __name__ == "__main__":

@@ -5,6 +5,13 @@ Versioning and the format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.0.0rc1] - 2026-09-07
+
+- Connected attack planning, validators, target execution, policy enforcement, and evidence.
+- Added complete CLI workflow groups, dashboard API/frontend, CVE/CycloneDX/SPDX intelligence,
+  instrumentation, security modules, adapters, signed packs, and benchmark applications.
+- Added release-candidate security, property, integration, and packaging verification.
+
 ## [0.9.0] - 2026-09-07
 
 - Added validators, judge ensembles, API/identity, RAG, MCP, provenance, and policy primitives.
