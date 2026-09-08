@@ -143,3 +143,80 @@ def test_dashboard_rejects_weak_token_and_remote_bind(tmp_path):
         create_app(database=tmp_path / "x", token="short")
     with pytest.raises(ValueError):
         create_app(database=tmp_path / "x", token="a-strong-token-value", bind_host="0.0.0.0")
+
+
+def test_dashboard_background_scan_jobs_and_live_events(tmp_path):
+    token = "correct-horse-battery-staple"
+    completed = Report(scan_id="SG-BACKGROUND")
+
+    async def scan_runner(request):
+        assert request["target_id"] == "target-1"
+        return completed
+
+    app = create_app(
+        database=tmp_path / "jobs.db",
+        token=token,
+        rate_limit=1000,
+        scan_runner=scan_runner,
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    with TestClient(app) as client:
+        assert (
+            client.post(
+                "/api/v1/targets",
+                headers=headers,
+                json={"id": "target-1", "type": "model"},
+            ).status_code
+            == 200
+        )
+        with client.websocket_connect("/api/v1/events", headers=headers) as websocket:
+            response = client.post(
+                "/api/v1/scan-jobs",
+                headers=headers,
+                json={"target_id": "target-1", "modules": ["agent"]},
+            )
+            assert response.status_code == 202
+            event_types = {websocket.receive_json()["type"] for _ in range(3)}
+            assert event_types == {"scan.queued", "scan.running", "scan.completed"}
+        job = client.get(
+            f"/api/v1/scan-jobs/{response.json()['job_id']}", headers=headers
+        ).json()
+        assert job["state"] == "COMPLETED" and job["scan_id"] == "SG-BACKGROUND"
+        assert client.get("/api/v1/scans/SG-BACKGROUND", headers=headers).status_code == 200
+
+
+def test_dashboard_scan_job_validation_and_failure_state(tmp_path):
+    token = "correct-horse-battery-staple"
+
+    async def broken_runner(request):
+        raise RuntimeError("sensitive target detail")
+
+    client = TestClient(
+        create_app(
+            database=tmp_path / "failed.db",
+            token=token,
+            rate_limit=1000,
+            scan_runner=broken_runner,
+        )
+    )
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.post("/api/v1/scan-jobs", headers=headers, json={}).status_code == 422
+    assert (
+        client.post(
+            "/api/v1/scan-jobs", headers=headers, json={"target_id": "missing"}
+        ).status_code
+        == 404
+    )
+    client.post(
+        "/api/v1/targets",
+        headers=headers,
+        json={"id": "target-1", "type": "model"},
+    )
+    response = client.post(
+        "/api/v1/scan-jobs", headers=headers, json={"target_id": "target-1"}
+    )
+    job = client.get(
+        f"/api/v1/scan-jobs/{response.json()['job_id']}", headers=headers
+    ).json()
+    assert job["state"] == "FAILED" and job["error"] == "RuntimeError"
+    assert "sensitive" not in str(job)

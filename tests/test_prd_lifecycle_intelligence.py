@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import zipfile
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -54,8 +55,9 @@ def test_replay_bundle_hash_validation(tmp_path):
     save_replay(report(), path, {"token": "secret"}, configuration={"mode": "SAFE"})
     loaded, inputs = load_replay(path)
     assert loaded.scan_id == "scan" and inputs["token"] == "[REDACTED]"
-    with zipfile.ZipFile(path, "a") as archive:
-        archive.writestr("inputs.json", "{}")
+    with pytest.warns(UserWarning, match="Duplicate name"):
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("inputs.json", "{}")
     with pytest.raises(ValueError, match="hash mismatch"):
         load_replay(path)
 
@@ -105,6 +107,43 @@ def test_cyclonedx_and_transactional_cache(tmp_path):
     cache = VulnerabilityCache(tmp_path / "data" / "cve.json")
     cache.save([Vulnerability("CVE-1", "demo", 9, status=Reachability.AFFECTED)])
     assert cache.search("demo")[0].status == Reachability.AFFECTED
+
+
+def test_vulnerability_cache_incremental_merge_and_freshness(tmp_path):
+    cache = VulnerabilityCache(tmp_path / "cve.json")
+    cache.save(
+        [Vulnerability("CVE-1", "one", 5)],
+        metadata={"etag": '"first"', "last_modified": "yesterday"},
+    )
+    assert cache.merge(
+        [Vulnerability("CVE-2", "two", 7)], metadata={"etag": '"second"'}
+    ) == 1
+    assert {item.id for item in cache.search("")} == {"CVE-1", "CVE-2"}
+    assert cache.metadata()["etag"] == '"second"'
+    assert cache.metadata()["schema_version"] == 1
+    synchronized = datetime.fromisoformat(str(cache.metadata()["synchronized_at"]))
+    assert cache.age_seconds(now=synchronized + timedelta(seconds=30)) == 30
+
+
+def test_nvd_untrusted_fields_are_bounded_and_reference_urls_are_sanitized():
+    document = {
+        "vulnerabilities": [
+            {
+                "cve": {
+                    "id": "CVE-2026-9999",
+                    "descriptions": [{"lang": "en", "value": "x" * 10_000}],
+                    "references": [
+                        {"url": "https://safe.example/advisory"},
+                        {"url": "javascript:alert(1)"},
+                        {"url": "https://user:password@unsafe.example"},
+                    ],
+                }
+            }
+        ]
+    }
+    value = parse_nvd(document)[0]
+    assert len(value.description) == 8_192
+    assert value.references == ("https://safe.example/advisory",)
 
 
 def test_spdx_roundtrip_and_offline_kev_enrichment():

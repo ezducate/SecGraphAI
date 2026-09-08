@@ -8,11 +8,12 @@ Python tools at runtime, and producing actionable scan reports. Version 1.0.0rc1
 the product-requirements architecture into testable end-to-end workflows while the
 independent pre-1.0 security review remains open.
 
-It includes OpenAPI/identity, RAG, MCP, provenance and policy testing; adaptive attack
-selection and signed packs; baselines, safe replay bundles, pytest regression generation,
-SARIF/JUnit output; OWASP profiles, CycloneDX/SPDX and offline CVE intelligence; plugin process
-isolation; an authenticated, local-only dashboard; utility/cost comparisons; research
-draft import; model supply-chain inspection; and bounded multimodal artifact handling.
+It includes OpenAPI/identity, RAG, MCP, provenance and policy testing; independent target,
+attack, judge, and remediation model roles; adaptive attack selection and signed packs;
+baselines, safe replay bundles, pytest regression generation, SARIF/JUnit output; OWASP
+profiles, CycloneDX/SPDX and offline CVE intelligence; plugin process/container isolation;
+an authenticated, local-only dashboard; utility/cost comparisons; research draft import;
+model supply-chain inspection; and bounded multimodal artifact handling.
 
 ## Install
 
@@ -46,6 +47,8 @@ secgraph init
 secgraph doctor
 secgraph discover ./src
 secgraph scan --callback module:function --format json
+secgraph replay scan.secgraph --callback module:function --fail-on-violation
+secgraph cve status --cache cve-cache.json
 ```
 
 Remote targets must be explicitly allow-listed. API keys are referenced through
@@ -81,9 +84,13 @@ python -m bandit -q -r src
 python -m build
 ```
 
-The benchmark in `demo/` provides vulnerable and hardened modes for cross-tenant access,
-RAG poisoning, privileged refunds, and agent tool abuse. The release workflow generates
-a CycloneDX SBOM and uses trusted publishing plus build-provenance attestation.
+The benchmark in `demo/` provides vulnerable and hardened modes for six seeded behaviors:
+object authorization, approval gates, indirect prompt injection and RAG isolation, external
+data flow, and runaway agent recursion. `demo.assessment.assess_demo` drives both variants
+through SecGraphAI's public API, RAG, and agent modules; the test suite requires every seeded
+behavior to be detected in the vulnerable app and absent from the hardened app. The release
+workflow generates a CycloneDX SBOM and uses trusted publishing plus build-provenance
+attestation.
 
 ## Security
 

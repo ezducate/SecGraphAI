@@ -13,6 +13,7 @@ from enum import StrEnum
 from importlib import metadata
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -254,8 +255,14 @@ def installed_components() -> list[Component]:
 class VulnerabilityCache:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self.metadata_path = self.path.with_suffix(f"{self.path.suffix}.meta.json")
 
-    def save(self, vulnerabilities: Iterable[Vulnerability]) -> None:
+    def save(
+        self,
+        vulnerabilities: Iterable[Vulnerability],
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         document = [
             {
@@ -279,11 +286,59 @@ class VulnerabilityCache:
             }
             for v in vulnerabilities
         ]
-        handle, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=".cve-", suffix=".json")
+        synchronized_at = datetime.now(UTC).isoformat()
+        cache_metadata = {
+            **(metadata or {}),
+            "schema_version": 1,
+            "synchronized_at": synchronized_at,
+            "records": len(document),
+        }
+        self._atomic_json(self.path, document)
+        self._atomic_json(self.metadata_path, cache_metadata)
+
+    def merge(
+        self,
+        vulnerabilities: Iterable[Vulnerability],
+        *,
+        metadata: dict[str, object] | None = None,
+    ) -> int:
+        """Incrementally merge records by CVE and component identity."""
+        existing = {(item.id, item.component): item for item in self.search("")}
+        incoming = list(vulnerabilities)
+        existing.update({(item.id, item.component): item for item in incoming})
+        self.save(existing.values(), metadata=metadata)
+        return len(incoming)
+
+    def metadata(self) -> dict[str, object]:
+        if not self.metadata_path.exists():
+            return {"schema_version": 0, "synchronized_at": None, "records": None}
+        try:
+            value = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError("vulnerability cache metadata is corrupt") from exc
+        if not isinstance(value, dict) or value.get("schema_version") != 1:
+            raise ValueError("vulnerability cache metadata is corrupt")
+        return value
+
+    def age_seconds(self, *, now: datetime | None = None) -> float | None:
+        synchronized_at = self.metadata().get("synchronized_at")
+        if not isinstance(synchronized_at, str):
+            return None
+        try:
+            timestamp = datetime.fromisoformat(synchronized_at)
+        except ValueError as exc:
+            raise ValueError("vulnerability cache metadata is corrupt") from exc
+        current = now or datetime.now(UTC)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        return max(0.0, (current - timestamp).total_seconds())
+
+    def _atomic_json(self, path: Path, value: object) -> None:
+        handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".cve-", suffix=".json")
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                json.dump(document, stream, sort_keys=True)
-            Path(temporary).replace(self.path)
+                json.dump(value, stream, sort_keys=True)
+            Path(temporary).replace(path)
         finally:
             Path(temporary).unlink(missing_ok=True)
 
@@ -367,19 +422,25 @@ def correlate_finding(finding: Finding, vulnerabilities: Iterable[Vulnerability]
 
 def parse_nvd(document: dict[str, Any]) -> list[Vulnerability]:
     results = []
-    for entry in document.get("vulnerabilities", []):
+    entries = document.get("vulnerabilities", [])
+    if not isinstance(entries, list):
+        return []
+    for entry in entries[:10_000]:
         cve = entry.get("cve", {}) if isinstance(entry, dict) else {}
         cve_id = str(cve.get("id", ""))
         if not re.fullmatch(r"CVE-\d{4}-\d{4,}", cve_id):
             continue
         descriptions = cve.get("descriptions", [])
-        description = next(
+        description = _bounded_text(
+            next(
             (
                 str(item.get("value", ""))
                 for item in descriptions
                 if isinstance(item, dict) and item.get("lang") == "en"
             ),
             "",
+            ),
+            8_192,
         )
         metrics = []
         metric_document = cve.get("metrics", {})
@@ -404,9 +465,11 @@ def parse_nvd(document: dict[str, Any]) -> list[Vulnerability]:
                     )
         weaknesses = frozenset(_nvd_weaknesses(cve.get("weaknesses", [])))
         references = tuple(
-            str(item.get("url"))
+            value
             for item in cve.get("references", [])
             if isinstance(item, dict) and item.get("url")
+            for value in [_safe_reference(str(item.get("url")))]
+            if value is not None
         )
         severity = max((item.base_score for item in metrics), default=0)
         affected_components = _nvd_affected_components(cve.get("configurations", []))
@@ -424,7 +487,7 @@ def parse_nvd(document: dict[str, Any]) -> list[Vulnerability]:
                     cvss=tuple(metrics),
                     affected_ranges=tuple(ranges),
                     references=references,
-                    source=str(cve.get("sourceIdentifier", "NVD")),
+                    source=_bounded_text(str(cve.get("sourceIdentifier", "NVD")), 512),
                     published=str(cve.get("published")) if cve.get("published") else None,
                     last_modified=str(cve.get("lastModified")) if cve.get("lastModified") else None,
                 )
@@ -450,6 +513,7 @@ class NVDClient:
             timeout,
             max_response_bytes,
         )
+        self.response_metadata: dict[str, object] = {}
 
     async def search(self, query: str) -> list[Vulnerability]:
         headers = (
@@ -462,6 +526,15 @@ class NVDClient:
                 params={"keywordSearch": query, "resultsPerPage": 2000},
                 headers=headers,
             ) as response:
+                self.response_metadata = {
+                    key: value
+                    for key, value in {
+                        "etag": response.headers.get("etag"),
+                        "last_modified": response.headers.get("last-modified"),
+                        "retry_after": response.headers.get("retry-after"),
+                    }.items()
+                    if value
+                }
                 response.raise_for_status()
                 chunks: list[bytes] = []
                 size = 0
@@ -477,6 +550,21 @@ class NVDClient:
         if not isinstance(document, dict):
             raise ValueError("NVD response must be an object")
         return parse_nvd(document)
+
+
+def _bounded_text(value: str, maximum: int) -> str:
+    return value[:maximum]
+
+
+def _safe_reference(value: str) -> str | None:
+    if len(value) > 2_048:
+        return None
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    if parsed.username or parsed.password:
+        return None
+    return value
 
 
 def _vulnerability_from_dict(item: dict[str, Any]) -> Vulnerability:

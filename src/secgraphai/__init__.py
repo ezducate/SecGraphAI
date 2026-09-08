@@ -26,6 +26,7 @@ from secgraphai.invariants import Invariant, InvariantEngine, invariant
 from secgraphai.model import Model
 from secgraphai.policy import PolicyEngine, Rule
 from secgraphai.provenance import Confidence, Label, Provenance, Tainted
+from secgraphai.roles import ModelRole, ModelRoles
 from secgraphai.runtime import Sensitive, secgraph
 from secgraphai.scanner import SecGraph
 
@@ -48,6 +49,8 @@ __all__ = [
     "Label",
     "Mode",
     "Model",
+    "ModelRole",
+    "ModelRoles",
     "NodeType",
     "Report",
     "SecGraph",

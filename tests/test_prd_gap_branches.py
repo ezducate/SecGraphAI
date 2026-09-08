@@ -128,7 +128,8 @@ async def test_rag_error_flood_provenance_metadata_and_config_branches():
     module = RAGSecurityModule(target)
     assert len(await module.test_poisoning("A")) == 1
     findings = await module.test_retrieval_controls("x", "A", max_results=1)
-    assert len(findings) == 4
+    assert len(findings) == 5
+    assert any("Instruction-bearing RAG content" in item.title for item in findings)
     assert len(module.audit_configuration()) == 5
     errors = await module.test_canary_lifecycle(owner_tenant="A", requesting_tenant="B")
     assert errors[0].verdict == Verdict.TEST_ERROR

@@ -250,7 +250,9 @@ async def discover_url(
         scope_guard=ScopeGuard(scope),
         max_response_bytes=max_response_bytes,
     )
-    response = await target.request("GET", parsed.path or "/openapi.json")
+    response = await target.request(
+        "GET", parsed.path or "/openapi.json", action="metadata_discovery"
+    )
     if response.status_code != 200:
         raise RuntimeError(f"OpenAPI discovery returned HTTP {response.status_code}")
     document = response.json()

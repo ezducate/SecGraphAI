@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 import respx
@@ -74,6 +75,40 @@ def test_plugin_audit_catches_trust_and_credentials():
     )
     problems = audit_plugins([manifest, manifest])
     assert len(problems) >= 4
+
+
+def test_container_plugin_uses_digest_pinning_and_strong_isolation(monkeypatch):
+    recorded = {}
+
+    def which(name):
+        return "C:/tools/docker.exe" if name == "docker" else None
+
+    def run(command, **kwargs):
+        recorded["command"] = command
+        recorded["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout='{"findings": []}')
+
+    monkeypatch.setattr("secgraphai.plugins.shutil.which", which)
+    monkeypatch.setattr("secgraphai.plugins.subprocess.run", run)
+    digest = "a" * 64
+    manifest = PluginManifest(
+        "isolated",
+        (f"registry.example/plugin@sha256:{digest}", "scan"),
+        mode=PluginMode.CONTAINER,
+        output_schema={"required": ["findings"]},
+    )
+    assert run_plugin(manifest, {"target": "sanitized"}) == {"findings": []}
+    command = recorded["command"]
+    assert command[0] == "C:/tools/docker.exe"
+    assert command[command.index("--network") + 1] == "none"
+    assert "--read-only" in command and "--cap-drop" in command
+    assert command[command.index("--security-opt") + 1] == "no-new-privileges"
+    assert recorded["kwargs"]["shell"] is False
+
+    unpinned = PluginManifest("bad", ("registry.example/plugin:latest",), mode=PluginMode.CONTAINER)
+    with pytest.raises(PermissionError, match="pinned"):
+        run_plugin(unpinned, {})
+    assert any("not digest-pinned" in item for item in audit_plugins([unpinned]))
 
 
 def test_self_audit_components(tmp_path, monkeypatch):

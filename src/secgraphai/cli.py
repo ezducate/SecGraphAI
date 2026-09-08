@@ -17,6 +17,7 @@ from rich.console import Console
 from rich.table import Table
 
 from secgraphai.attacks import load_official_pack, load_pack
+from secgraphai.config import Mode
 from secgraphai.core import Report, Verdict
 from secgraphai.dashboard import create_app
 from secgraphai.discovery import discover_path, discover_url
@@ -36,6 +37,7 @@ from secgraphai.intelligence import (
 from secgraphai.lifecycle import (
     BaselineStore,
     diff_reports,
+    execute_replay,
     load_replay,
     regression_bundle,
     save_replay,
@@ -167,6 +169,7 @@ def scan(
     dashboard: Annotated[bool, typer.Option("--dashboard")] = False,
     output: Annotated[Path | None, typer.Option("--output", "-o")] = None,
     format: Annotated[str, typer.Option("--format")] = "terminal",
+    mode: Annotated[Mode, typer.Option("--mode")] = Mode.SAFE,
 ) -> None:
     """Run bounded security checks against a callback or OpenAI-compatible target."""
     if bool(callback) == bool(target_url):
@@ -192,7 +195,7 @@ def scan(
             raise typer.BadParameter("callback must use module:function syntax")
         target_callable = getattr(importlib.import_module(module_name), attribute)
         report = asyncio.run(
-            SecGraph(budget=budget).scan(
+            SecGraph(budget=budget, mode=mode).scan(
                 target_callable,
                 modules=modules[profile],
                 strategy="adaptive",
@@ -212,7 +215,7 @@ def scan(
             },
         }
         report = asyncio.run(
-            SecGraph(target=target_config, budget=budget).scan(
+            SecGraph(target=target_config, budget=budget, mode=mode).scan(
                 modules=modules[profile], strategy="adaptive", attack_budget=max_requests
             )
         )
@@ -276,9 +279,28 @@ def compare(old: Annotated[Path, typer.Argument()], new: Annotated[Path, typer.A
 
 
 @app.command("replay")
-def replay(path: Annotated[Path, typer.Argument()]) -> None:
-    """Validate and inspect a safe replay bundle."""
+def replay(
+    path: Annotated[Path, typer.Argument()],
+    callback: Annotated[
+        str | None, typer.Option(help="Import path module:function used to re-run cases")
+    ] = None,
+    fail_on_violation: Annotated[bool, typer.Option("--fail-on-violation")] = False,
+) -> None:
+    """Validate a replay bundle and optionally re-run its cases."""
     report, inputs = load_replay(path)
+    if callback:
+        module_name, separator, attribute = callback.partition(":")
+        if not separator:
+            raise typer.BadParameter("callback must use module:function syntax")
+        target_callable = getattr(importlib.import_module(module_name), attribute)
+        result = asyncio.run(execute_replay(report, inputs, target_callable))
+        typer.echo(result.model_dump_json())
+        summary = result.summary()
+        if summary[Verdict.TEST_ERROR.value]:
+            raise typer.Exit(2)
+        if fail_on_violation and summary[Verdict.VERIFIED_VIOLATION.value]:
+            raise typer.Exit(1)
+        return
     typer.echo(
         json.dumps(
             {"scan_id": report.scan_id, "summary": report.summary(), "inputs": redact(inputs)},
@@ -392,8 +414,12 @@ def bundle_create(
 
 
 @bundle_app.command("replay")
-def bundle_replay(path: Annotated[Path, typer.Argument()]) -> None:
-    replay(path)
+def bundle_replay(
+    path: Annotated[Path, typer.Argument()],
+    callback: Annotated[str | None, typer.Option()] = None,
+    fail_on_violation: Annotated[bool, typer.Option("--fail-on-violation")] = False,
+) -> None:
+    replay(path, callback=callback, fail_on_violation=fail_on_violation)
 
 
 @report_app.command("render")
@@ -435,9 +461,20 @@ def cve_sync(
     query: Annotated[str, typer.Option("--query")] = "Python",
     cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json"),
 ) -> None:
-    values = asyncio.run(NVDClient().search(query))
-    VulnerabilityCache(cache).save(values)
-    typer.echo(f"Saved {len(values)} records")
+    client = NVDClient()
+    values = asyncio.run(client.search(query))
+    stored = VulnerabilityCache(cache)
+    merged = stored.merge(values, metadata={"query": query, **client.response_metadata})
+    typer.echo(
+        json.dumps(
+            {
+                "fetched": merged,
+                "cached": len(stored.search("")),
+                "metadata": stored.metadata(),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 @cve_app.command("affected")
@@ -460,6 +497,18 @@ def cve_affected(
 def cve_reachable(cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json")) -> None:
     matches = [item.__dict__ for item in VulnerabilityCache(cache).search("") if item.reachable]
     typer.echo(json.dumps(matches, default=list))
+
+
+@cve_app.command("status")
+def cve_status(cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json")) -> None:
+    """Show the offline cache schema, source validators, and data age."""
+    stored = VulnerabilityCache(cache)
+    typer.echo(
+        json.dumps(
+            {**stored.metadata(), "age_seconds": stored.age_seconds()},
+            sort_keys=True,
+        )
+    )
 
 
 def _owasp_results(report: Report) -> list[tuple[str, CoverageState]]:

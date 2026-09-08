@@ -3,6 +3,28 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from demo.app import hardened_app, vulnerable_app
+from demo.assessment import assess_demo
+
+
+async def _results(app):
+    return {name: len(findings) for name, findings in (await assess_demo(app)).items()}
+
+
+def test_secgraphai_modules_detect_all_six_seeded_behaviors():
+    import asyncio
+
+    vulnerable = asyncio.run(_results(vulnerable_app))
+    hardened = asyncio.run(_results(hardened_app))
+    assert set(vulnerable) == {
+        "object_authorization",
+        "approval",
+        "rag_isolation_and_injection",
+        "prompt_injection",
+        "external_data_flow",
+        "recursion_budget",
+    }
+    assert all(count > 0 for count in vulnerable.values())
+    assert all(count == 0 for count in hardened.values())
 
 
 def test_vulnerable_and_hardened_cross_tenant_modes():

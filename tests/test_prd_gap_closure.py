@@ -30,7 +30,7 @@ from secgraphai.model import Model
 from secgraphai.policy import Effect, PolicyEngine, Rule
 from secgraphai.reporting import to_html, to_markdown
 from secgraphai.runtime import PolicyDenied, RuntimePolicyAspect, SecurityContext
-from secgraphai.scanner import SecGraph
+from secgraphai.scanner import SecGraph, TargetResult
 from secgraphai.security_modules import (
     AgentSecurityModule,
     APISecurityModule,
@@ -177,6 +177,28 @@ async def test_adaptive_scan_records_feedback_and_empty_budget_runs_nothing():
     prompts.clear()
     empty = await scanner.scan_attacks(callback, features=["rag"], attack_budget=0)
     assert prompts == [] and empty.interactions == []
+
+
+@pytest.mark.asyncio
+async def test_adaptive_scan_follows_measured_boundary_progress_without_a_finding():
+    attack = Attack("tool", "tool-abuse", "try tool", tags=frozenset({"agent"}))
+    memory = AttackMemory()
+    scanner = SecGraph(planner=AttackPlanner([attack], memory), seed=3)
+    prompts = []
+
+    async def callback(prompt):
+        prompts.append(prompt)
+        return TargetResult("blocked", tools=("refund",))
+
+    await scanner.scan_attacks(
+        callback,
+        features=["agent"],
+        attack_budget=2,
+        strategy="adaptive",
+    )
+    assert len(prompts) == 2
+    assert memory.observations[0].stage == "boundary_progress"
+    assert memory.observations[0].evidence == "TOOL_REQUESTED"
 
 
 def test_storage_materializes_prd_tables_and_persists_documents(tmp_path):

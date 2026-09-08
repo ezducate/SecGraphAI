@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from secgraphai.canary import CanaryFactory
+from secgraphai.config import Mode
 from secgraphai.security import ScopeGuard
 
 
@@ -158,12 +159,16 @@ class APITarget:
         timeout: float = 20,
         max_response_bytes: int = 2_000_000,
         transport: httpx.AsyncBaseTransport | None = None,
+        mode: Mode | str = Mode.SAFE,
+        allowed_actions: Iterable[str] = (),
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.scope_guard = scope_guard
         self.timeout = timeout
         self.max_response_bytes = max_response_bytes
         self.transport = transport
+        self.mode = Mode(mode)
+        self.allowed_actions = frozenset(allowed_actions)
 
     async def request(
         self,
@@ -173,9 +178,32 @@ class APITarget:
         identity: Identity | None = None,
         json_body: Any = None,
         headers: dict[str, str] | None = None,
+        action: str | None = None,
     ) -> TargetResponse:
         url = f"{self.base_url}/{path.lstrip('/')}"
-        self.scope_guard.authorize(url)
+        normalized_method = method.upper()
+        classified_action = action or {
+            "GET": "read",
+            "HEAD": "metadata_discovery",
+            "OPTIONS": "metadata_discovery",
+            "DELETE": "destructive_write",
+        }.get(normalized_method, "active_write")
+        if self.mode == Mode.PASSIVE and classified_action != "metadata_discovery":
+            raise PermissionError("PASSIVE mode permits metadata discovery only")
+        if self.mode == Mode.SAFE and classified_action in {
+            "active_write",
+            "destructive_write",
+            "account_deletion",
+            "external_side_effect",
+        }:
+            raise PermissionError(f"SAFE mode blocks action: {classified_action}")
+        if (
+            self.mode == Mode.CUSTOM
+            and classified_action not in self.allowed_actions
+            and classified_action != "metadata_discovery"
+        ):
+            raise PermissionError(f"CUSTOM mode does not allow action: {classified_action}")
+        self.scope_guard.authorize(url, action=classified_action)
         request_headers = dict(headers or {})
         if identity and identity.authorization():
             request_headers["Authorization"] = identity.authorization() or ""
@@ -184,7 +212,7 @@ class APITarget:
             timeout=self.timeout, follow_redirects=False, transport=self.transport
         ) as client:
             async with client.stream(
-                method, url, json=json_body, headers=request_headers
+                normalized_method, url, json=json_body, headers=request_headers
             ) as response:
                 chunks, size = [], 0
                 async for chunk in response.aiter_bytes():

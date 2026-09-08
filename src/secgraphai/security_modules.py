@@ -223,6 +223,24 @@ class RAGSecurityModule:
                     )
                 )
             if any(
+                phrase in item.text.casefold()
+                for phrase in (
+                    "ignore previous",
+                    "system override",
+                    "reveal secret",
+                    "disregard instructions",
+                )
+            ):
+                findings.append(
+                    _finding(
+                        "RAG-INJECTION",
+                        item.id,
+                        "Instruction-bearing RAG content can influence processing",
+                        {"document": item.id, "tenant": item.tenant},
+                        ["LLM01", "LLM05"],
+                    )
+                )
+            if any(
                 key.casefold() in {"instruction", "system_prompt", "override"}
                 for key in item.metadata
             ):
@@ -389,6 +407,44 @@ class APISecurityModule:
                     )
                 )
         return findings
+
+    async def test_operation(
+        self,
+        method: str,
+        path: str,
+        *,
+        expected_status: Iterable[int],
+        identity: Identity | None = None,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
+        action: str | None = None,
+    ) -> list[Finding]:
+        """Verify one bounded API operation, including request bodies and headers."""
+        expected = frozenset(expected_status)
+        response = await self.target.request(
+            method,
+            path,
+            identity=identity,
+            json_body=json_body,
+            headers=headers,
+            action=action,
+        )
+        if response.status_code in expected:
+            return []
+        return [
+            _finding(
+                "API-EXPECTATION",
+                f"{method.upper()}:{path}",
+                "API operation result differed from the security expectation",
+                {
+                    "method": method.upper(),
+                    "path": path,
+                    "expected": sorted(expected),
+                    "observed": response.status_code,
+                },
+                ["API1", "API5", "ASI03"],
+            )
+        ]
 
     def audit_openapi(self, schema: dict[str, Any]) -> list[Finding]:
         """Perform side-effect-free API security checks directly on an OpenAPI document."""

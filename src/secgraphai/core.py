@@ -103,6 +103,7 @@ class Finding(BaseModel):
     component_ids: list[str] = Field(default_factory=list)
     known_exploited: bool | None = None
     fingerprint: str | None = None
+    reproduction: dict[str, Any] = Field(default_factory=dict)
 
 
 class Report(BaseModel):

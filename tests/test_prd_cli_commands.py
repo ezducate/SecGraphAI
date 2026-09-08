@@ -81,6 +81,7 @@ def test_cli_cve_sbom_pack_plugin_engines_and_openapi(tmp_path):
     invoke(["cve", "show", "CVE-1", "--cache", cache])
     invoke(["cve", "affected", "demo", "1.0", "--cache", cache])
     invoke(["cve", "reachable", "--cache", cache])
+    invoke(["cve", "status", "--cache", cache])
     bom = tmp_path / "bom.json"
     invoke(["sbom", "generate", "--output", bom])
     spdx = tmp_path / "bom.spdx.json"
@@ -113,6 +114,25 @@ def test_cli_cve_sbom_pack_plugin_engines_and_openapi(tmp_path):
     spec = tmp_path / "openapi.json"
     spec.write_text(json.dumps({"paths": {"/x": {"get": {}}}}))
     assert "GET" in invoke(["openapi", spec]).output
+
+
+def test_cli_cve_sync_incrementally_preserves_existing_records(tmp_path, monkeypatch):
+    cache = tmp_path / "cve.json"
+    VulnerabilityCache(cache).save([Vulnerability("CVE-OLD", "old", 4)])
+
+    async def search(client, query):
+        client.response_metadata = {"etag": '"current"'}
+        return [Vulnerability("CVE-NEW", query, 8)]
+
+    monkeypatch.setattr("secgraphai.cli.NVDClient.search", search)
+    result = invoke(["cve", "sync", "--query", "demo", "--cache", cache])
+    output = json.loads(result.output)
+    assert output["fetched"] == 1 and output["cached"] == 2
+    assert output["metadata"]["etag"] == '"current"'
+    assert {item.id for item in VulnerabilityCache(cache).search("")} == {
+        "CVE-OLD",
+        "CVE-NEW",
+    }
 
 
 def test_cli_init_doctor_discover_self_audit_and_scan(tmp_path):

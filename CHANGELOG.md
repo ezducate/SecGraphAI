@@ -5,6 +5,13 @@ Versioning and the format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+- Enforced PASSIVE, SAFE, LAB, and CUSTOM request modes and recorded finding reproduction inputs.
+- Added executable replay verification, persisted dashboard scan jobs, and authenticated live events.
+- Added four independent model roles, boundary-progress adaptive search, and a package-driven
+  six-behavior vulnerable/hardened benchmark.
+- Added incremental CVE cache metadata/freshness and digest-pinned container plugin isolation.
+- Expanded security and integration coverage to more than 450 tests.
+
 ## [1.0.0rc1] - 2026-09-07
 
 - Connected attack planning, validators, target execution, policy enforcement, and evidence.

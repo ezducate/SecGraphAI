@@ -16,7 +16,9 @@ from secgraphai.reporting import to_json
 from secgraphai.security import redact
 
 SCHEMA_VERSION = 1
-DOCUMENT_TABLES = frozenset({"targets", "policies", "baselines", "bundles", "plugin_registry"})
+DOCUMENT_TABLES = frozenset(
+    {"targets", "policies", "baselines", "bundles", "plugin_registry", "jobs"}
+)
 
 
 class Storage:
@@ -171,6 +173,16 @@ class Storage:
                 (limit,),
             ).fetchall()
         return [json.loads(str(row["document"])) for row in rows]
+
+    def get_document(self, table: str, identifier: str) -> dict[str, Any] | None:
+        if table not in DOCUMENT_TABLES:
+            raise ValueError("unsupported document table")
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT document FROM {table} WHERE id = ?",  # nosec B608  # noqa: S608
+                (identifier,),
+            ).fetchone()
+        return json.loads(str(row["document"])) if row else None
 
     def attack_paths(self, scan_id: str | None = None) -> builtins.list[dict[str, Any]]:
         query = "SELECT document FROM attack_paths"

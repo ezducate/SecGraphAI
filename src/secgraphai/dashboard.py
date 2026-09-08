@@ -1,20 +1,45 @@
 """Authenticated, local-by-default dashboard API with defensive middleware."""
 
-from __future__ import annotations
-
+import asyncio
 import hmac
 import time
+import uuid
 from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable
 from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+from secgraphai.config import Mode
 from secgraphai.core import Report, Verdict
 from secgraphai.intelligence import OWASP_PROFILES, CoverageState, coverage_matrix
 from secgraphai.lifecycle import regression_bundle
 from secgraphai.policy import Effect, PolicyEngine, Rule
+from secgraphai.scanner import SecGraph
 from secgraphai.self_security import run_self_audit
 from secgraphai.storage import Storage
+
+
+class EventBroker:
+    """Bounded in-process fan-out for authenticated dashboard live updates."""
+
+    def __init__(self, *, queue_size: int = 100) -> None:
+        self.queue_size = queue_size
+        self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+
+    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=self.queue_size)
+        self.subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        self.subscribers.discard(queue)
+
+    async def publish(self, event: dict[str, Any]) -> None:
+        for queue in tuple(self.subscribers):
+            if queue.full():
+                queue.get_nowait()
+            queue.put_nowait(event)
 
 
 def create_app(
@@ -24,12 +49,14 @@ def create_app(
     bind_host: str = "127.0.0.1",
     max_body_bytes: int = 2_000_000,
     rate_limit: int = 120,
+    scan_runner: Callable[[dict[str, Any]], Awaitable[Report]] | None = None,
 ):
     if not token or len(token) < 16:
         raise ValueError("dashboard token must contain at least 16 characters")
     if bind_host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("remote dashboard binding requires an external authenticated proxy")
     from fastapi import (
+        BackgroundTasks,
         Depends,
         FastAPI,
         Header,
@@ -43,6 +70,8 @@ def create_app(
 
     app = FastAPI(title="SecGraphAI", docs_url=None, redoc_url=None)
     storage = Storage(database)
+    broker = EventBroker()
+    app.state.event_broker = broker
     request_times: dict[str, deque[float]] = defaultdict(deque)
     static_root = files("secgraphai").joinpath("static")
     app.mount("/static", StaticFiles(directory=str(static_root)), name="static")
@@ -106,10 +135,84 @@ def create_app(
         return [item.model_dump(mode="json") for item in storage.list(limit=limit, offset=offset)]
 
     @app.post("/api/v1/scans", dependencies=[Depends(authenticate)])
-    def save_scan(document: dict[str, Any]) -> dict[str, str]:
+    async def save_scan(document: dict[str, Any]) -> dict[str, str]:
         report = Report.model_validate(document)
         storage.save(report)
+        await broker.publish(
+            {"type": "scan.completed", "scan_id": report.scan_id, "summary": report.summary()}
+        )
         return {"scan_id": report.scan_id}
+
+    async def run_configured_scan(request: dict[str, Any]) -> Report:
+        target_id = str(request.get("target_id", ""))
+        target = storage.get_document("targets", target_id)
+        if target is None:
+            raise ValueError("target not found")
+        target_config = target.get("configuration", target)
+        if not isinstance(target_config, dict):
+            raise ValueError("target configuration must be an object")
+        raw_modules = request.get("modules", ["prompt-injection", "agent"])
+        if not isinstance(raw_modules, list) or not all(
+            isinstance(item, str) for item in raw_modules
+        ):
+            raise ValueError("modules must be a list of strings")
+        return await SecGraph(
+            target=target_config,
+            mode=Mode(str(request.get("mode", Mode.SAFE.value))),
+        ).scan(
+            modules=raw_modules,
+            strategy="adaptive",
+            attack_budget=min(1000, max(1, int(request.get("attack_budget", 20)))),
+        )
+
+    async def execute_job(job_id: str, request: dict[str, Any]) -> None:
+        running = {"id": job_id, "state": "RUNNING", "target_id": request.get("target_id")}
+        storage.put_document("jobs", job_id, running)
+        await broker.publish({"type": "scan.running", **running})
+        try:
+            report = await (scan_runner or run_configured_scan)(request)
+            storage.save(report)
+            complete = {
+                "id": job_id,
+                "state": "COMPLETED",
+                "target_id": request.get("target_id"),
+                "scan_id": report.scan_id,
+                "summary": report.summary(),
+            }
+            storage.put_document("jobs", job_id, complete)
+            await broker.publish({"type": "scan.completed", **complete})
+        except Exception as exc:
+            failed = {
+                "id": job_id,
+                "state": "FAILED",
+                "target_id": request.get("target_id"),
+                "error": type(exc).__name__,
+            }
+            storage.put_document("jobs", job_id, failed)
+            await broker.publish({"type": "scan.failed", **failed})
+
+    @app.post("/api/v1/scan-jobs", dependencies=[Depends(authenticate)], status_code=202)
+    async def start_scan_job(
+        document: dict[str, Any], background_tasks: BackgroundTasks
+    ) -> dict[str, str]:
+        target_id = document.get("target_id")
+        if not isinstance(target_id, str) or not target_id:
+            raise HTTPException(status_code=422, detail="scan job requires target_id")
+        if storage.get_document("targets", target_id) is None:
+            raise HTTPException(status_code=404, detail="target not found")
+        job_id = f"SG-JOB-{uuid.uuid4().hex[:12].upper()}"
+        queued = {"id": job_id, "state": "QUEUED", "target_id": target_id}
+        storage.put_document("jobs", job_id, queued)
+        await broker.publish({"type": "scan.queued", **queued})
+        background_tasks.add_task(execute_job, job_id, document)
+        return {"job_id": job_id, "state": "QUEUED"}
+
+    @app.get("/api/v1/scan-jobs/{job_id}", dependencies=[Depends(authenticate)])
+    def scan_job(job_id: str) -> dict[str, Any]:
+        job = storage.get_document("jobs", job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="not found")
+        return job
 
     @app.get("/api/v1/scans/{scan_id}", dependencies=[Depends(authenticate)])
     def scan(scan_id: str) -> dict[str, Any]:
@@ -191,8 +294,8 @@ def create_app(
         ]
 
     @app.post("/api/v1/reports", dependencies=[Depends(authenticate)])
-    def create_report(document: dict[str, Any]) -> dict[str, str]:
-        return save_scan(document)
+    async def create_report(document: dict[str, Any]) -> dict[str, str]:
+        return await save_scan(document)
 
     @app.get("/api/v1/self-audit", dependencies=[Depends(authenticate)])
     @app.post("/api/v1/self-audit", dependencies=[Depends(authenticate)])
@@ -238,7 +341,7 @@ def create_app(
         return coverage_matrix(profile, observed)
 
     @app.websocket("/api/v1/events")
-    async def events(websocket: WebSocket) -> None:
+    async def live_events(websocket: WebSocket) -> None:
         authorization = websocket.headers.get("authorization", "").removeprefix("Bearer ")
         protocols = [
             item.strip() for item in websocket.headers.get("sec-websocket-protocol", "").split(",")
@@ -251,11 +354,17 @@ def create_app(
             await websocket.close(code=4401)
             return
         await websocket.accept(subprotocol="secgraphai" if protocol_token else None)
+        queue = broker.subscribe()
         try:
             while True:
-                await websocket.send_json({"type": "heartbeat", "time": time.time()})
-                await websocket.receive_text()
-        except WebSocketDisconnect:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15)
+                except TimeoutError:
+                    event = {"type": "heartbeat", "time": time.time()}
+                await websocket.send_json(event)
+        except (WebSocketDisconnect, RuntimeError):
             pass
+        finally:
+            broker.unsubscribe(queue)
 
     return app

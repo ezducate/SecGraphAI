@@ -3,19 +3,48 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import platform
 import re
 import sys
 import zipfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
 # XML is generated only; no untrusted XML is parsed by this module.
 from xml.etree.ElementTree import Element, SubElement, tostring  # nosec B405
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from secgraphai.core import Finding, Report, Severity, Verdict
 from secgraphai.security import redact
+
+
+class ReplayAttempt(BaseModel):
+    """One safely re-executed request from a replay bundle."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    finding_id: str | None = None
+    prompt: str
+    verdict: Verdict
+    matched_markers: list[str] = Field(default_factory=list)
+    output: str | None = None
+    error: str | None = None
+
+
+class ReplayResult(BaseModel):
+    """Aggregate result of executing the data-only cases in a replay bundle."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    attempts: list[ReplayAttempt] = Field(default_factory=list)
+
+    def summary(self) -> dict[str, int]:
+        result = {verdict.value: 0 for verdict in Verdict}
+        for attempt in self.attempts:
+            result[attempt.verdict.value] += 1
+        return result
 
 
 def canonical_json(value: Any) -> bytes:
@@ -99,20 +128,24 @@ def save_replay(
     policies: list[dict[str, object]] | None = None,
     tests: list[dict[str, object]] | None = None,
 ) -> None:
-    """Create a safe, non-executable replay bundle."""
+    """Create a safe bundle containing data-only cases that can be re-executed."""
     safe_report = finalize_report(
         report, configuration=configuration, policies=policies, test_definitions=tests
     )
+    replay_inputs = dict(inputs)
+    if "cases" not in replay_inputs:
+        replay_inputs["cases"] = _replay_cases(safe_report)
     content = {
         "report.json": safe_report.model_dump_json(),
-        "inputs.json": json.dumps(redact(inputs), sort_keys=True),
+        "inputs.json": json.dumps(redact(replay_inputs), sort_keys=True),
         "configuration.json": json.dumps(redact(configuration or {}), sort_keys=True),
         "policies.json": json.dumps(redact(policies or []), sort_keys=True),
         "tests.json": json.dumps(redact(tests or []), sort_keys=True),
     }
     manifest = {
-        "schema": 2,
+        "schema": 3,
         "executable": False,
+        "replayable": True,
         "hashes": {
             name: hashlib.sha256(value.encode()).hexdigest() for name, value in content.items()
         },
@@ -125,7 +158,10 @@ def save_replay(
 
 def load_replay(path: str | Path, max_bytes: int = 10_000_000) -> tuple[Report, dict[str, object]]:
     with zipfile.ZipFile(path) as archive:
-        names = set(archive.namelist())
+        listed_names = archive.namelist()
+        names = set(listed_names)
+        if len(listed_names) != len(names):
+            raise ValueError("replay artifact hash mismatch: duplicate content")
         required = {"report.json", "inputs.json", "manifest.json"}
         if not required <= names or not names <= required | {
             "configuration.json",
@@ -142,8 +178,22 @@ def load_replay(path: str | Path, max_bytes: int = 10_000_000) -> tuple[Report, 
             for info in archive.infolist()
         ):
             raise ValueError("unsafe replay archive")
-        manifest = json.loads(archive.read("manifest.json"))
-        for name, expected in manifest.get("hashes", {}).items():
+        try:
+            manifest = json.loads(archive.read("manifest.json"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("replay manifest is invalid") from exc
+        artifact_names = names - {"manifest.json"}
+        hashes = manifest.get("hashes") if isinstance(manifest, dict) else None
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("schema") not in {2, 3}
+            or manifest.get("executable") is not False
+            or not isinstance(hashes, dict)
+            or set(hashes) != artifact_names
+            or not all(isinstance(value, str) for value in hashes.values())
+        ):
+            raise ValueError("replay manifest is invalid")
+        for name, expected in hashes.items():
             if name not in names or hashlib.sha256(archive.read(name)).hexdigest() != expected:
                 raise ValueError("replay artifact hash mismatch")
         return (
@@ -152,13 +202,106 @@ def load_replay(path: str | Path, max_bytes: int = 10_000_000) -> tuple[Report, 
         )
 
 
+async def execute_replay(
+    report: Report,
+    inputs: dict[str, object],
+    callback: Callable[[str], str | Awaitable[str]],
+) -> ReplayResult:
+    """Re-run a bundle's inert prompts against an explicitly supplied callback."""
+    raw_cases = inputs.get("cases")
+    cases = raw_cases if isinstance(raw_cases, list) else _replay_cases(report)
+    attempts: list[ReplayAttempt] = []
+    for raw_case in cases:
+        if not isinstance(raw_case, dict):
+            attempts.append(
+                ReplayAttempt(
+                    prompt="",
+                    verdict=Verdict.TEST_ERROR,
+                    error="invalid replay case",
+                )
+            )
+            continue
+        prompt_value = raw_case.get("prompt")
+        if not isinstance(prompt_value, str):
+            attempts.append(
+                ReplayAttempt(
+                    prompt="",
+                    verdict=Verdict.TEST_ERROR,
+                    error="invalid replay case",
+                )
+            )
+            continue
+        prompt = prompt_value
+        finding_id = raw_case.get("finding_id")
+        markers = raw_case.get("forbidden_markers", [])
+        safe_markers = (
+            [value for value in markers if isinstance(value, str) and value]
+            if isinstance(markers, list)
+            else []
+        )
+        try:
+            value = callback(prompt)
+            output = await value if inspect.isawaitable(value) else value
+            rendered = str(output)
+            matched = [marker for marker in safe_markers if marker in rendered]
+            verdict = Verdict.VERIFIED_VIOLATION if matched else Verdict.PASS
+            attempts.append(
+                ReplayAttempt(
+                    finding_id=finding_id if isinstance(finding_id, str) else None,
+                    prompt=prompt,
+                    verdict=verdict,
+                    matched_markers=matched,
+                    output=str(redact(rendered)),
+                )
+            )
+        except Exception as exc:  # target failures are replay results, not runner failures
+            attempts.append(
+                ReplayAttempt(
+                    finding_id=finding_id if isinstance(finding_id, str) else None,
+                    prompt=prompt,
+                    verdict=Verdict.TEST_ERROR,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            )
+    return ReplayResult(attempts=attempts)
+
+
+def _replay_cases(report: Report) -> list[dict[str, object]]:
+    interactions = {item.test_id: item for item in report.interactions}
+    cases: list[dict[str, object]] = []
+    for finding in report.findings:
+        prompt = finding.reproduction.get("prompt")
+        if not isinstance(prompt, str):
+            test_id = finding.reproduction.get("test_id")
+            interaction = interactions.get(test_id) if isinstance(test_id, str) else None
+            prompt = interaction.request.get("prompt") if interaction else None
+        if not isinstance(prompt, str):
+            continue
+        markers = [
+            evidence.observed
+            for evidence in finding.evidence
+            if evidence.deterministic and isinstance(evidence.observed, str) and evidence.observed
+        ]
+        cases.append(
+            {
+                "finding_id": finding.id,
+                "prompt": prompt,
+                "forbidden_markers": list(dict.fromkeys(markers)),
+            }
+        )
+    return cases
+
+
 def pytest_regression(finding: Finding) -> str:
     marker = next((e.observed for e in finding.evidence if e.observed), "forbidden marker")
+    prompt = finding.reproduction.get("prompt", finding.title)
+    if not isinstance(prompt, str):
+        prompt = finding.title
     return (
         "import pytest\n\n"
         "@pytest.mark.secgraph\n"
         f"def test_secgraph_regression_{_python_name(finding.id)}(target):\n"
-        f"    output = target({json.dumps(finding.title)})\n"
+        f"    output = target({json.dumps(prompt)})\n"
         f"    assert {json.dumps(marker)} not in output\n"
     )
 
@@ -186,7 +329,10 @@ def regression_bundle(finding: Finding) -> dict[str, str]:
             },
             indent=2,
         ),
-        "ci": f"secgraph replay {finding.id} --fail-on-violation",
+        "ci": (
+            "secgraph replay \"$SECGRAPH_REPLAY_BUNDLE\" "
+            "--callback \"$SECGRAPH_TARGET_CALLBACK\" --fail-on-violation"
+        ),
     }
 
 
