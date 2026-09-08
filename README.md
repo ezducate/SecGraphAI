@@ -18,10 +18,12 @@ model supply-chain inspection; and bounded multimodal artifact handling.
 ## Install
 
 ```bash
-pip install secgraphai
+python -m pip install --pre secgraphai
 ```
 
-Python 3.11 or newer is required.
+Python 3.11 or newer is required. To install this release candidate exactly, use
+`python -m pip install "secgraphai==1.0.0rc1"`. After a stable release is available,
+`python -m pip install secgraphai` will select the latest stable version normally.
 
 ## Quick start
 
@@ -60,6 +62,8 @@ The [detailed user guide](docs/USER_GUIDE.md) covers installation extras, safety
 scope configuration, callback and OpenAI-compatible scans, local/OpenTelemetry/MCP
 discovery, API identity matrices, RAG isolation, agent analysis, invariants, reports,
 replay and baselines, OWASP CI gates, SBOM/CVE workflows, plugins, and the dashboard API.
+Maintainers can follow the [release runbook](docs/RELEASING.md) for the tag, GitHub
+environment, PyPI trusted-publisher, provenance, and post-publication checks.
 
 Common starting points:
 

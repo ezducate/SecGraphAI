@@ -14,23 +14,36 @@ reserve `LAB` mode for isolated test environments.
 Python 3.11 or newer is required.
 
 ```bash
-pip install secgraphai
+python -m pip install --pre secgraphai
 ```
+
+The current public line is the `1.0.0rc1` release candidate. `--pre` allows pip to select
+it before a stable release exists. For a reproducible installation, pin it explicitly:
+
+```bash
+python -m pip install "secgraphai==1.0.0rc1"
+python -c "from importlib.metadata import version; print(version('secgraphai'))"
+```
+
+Use a virtual environment for applications and CI so SecGraphAI's dependencies remain
+isolated. To upgrade to a newer prerelease, run
+`python -m pip install --upgrade --pre secgraphai`. Once a stable release is available,
+omit `--pre` to stay on the stable channel.
 
 Install only the optional capabilities you need:
 
 ```bash
-pip install "secgraphai[dashboard]"     # local dashboard and HTTP API
-pip install "secgraphai[mcp]"           # MCP support (no additional dependency today)
-pip install "secgraphai[rag]"           # RAG support (bring your own retriever client)
-pip install "secgraphai[pii]"           # PII adapter entry point (bring your own engine)
-pip install "secgraphai[otel]"          # OpenTelemetry event emission
-pip install "secgraphai[evolution]"     # bounded evolutionary planner (included in core)
-pip install "secgraphai[integrations]"  # Schemathesis and OpenTelemetry APIs
-pip install "secgraphai[security]"      # signing, dependency audit, secret scanning
-pip install "secgraphai[pdf]"           # PDF report output
-pip install "secgraphai[research]"      # PDF research import
-pip install "secgraphai[all]"           # all optional features and development tools
+python -m pip install --pre "secgraphai[dashboard]"     # local dashboard and HTTP API
+python -m pip install --pre "secgraphai[mcp]"           # MCP support (no extra dependency today)
+python -m pip install --pre "secgraphai[rag]"           # RAG support (bring your own retriever client)
+python -m pip install --pre "secgraphai[pii]"           # PII adapter entry point (bring your own engine)
+python -m pip install --pre "secgraphai[otel]"          # OpenTelemetry event emission
+python -m pip install --pre "secgraphai[evolution]"     # bounded evolutionary planner (included in core)
+python -m pip install --pre "secgraphai[integrations]"  # Schemathesis and OpenTelemetry APIs
+python -m pip install --pre "secgraphai[security]"      # signing, dependency audit, secret scanning
+python -m pip install --pre "secgraphai[pdf]"           # PDF report output
+python -m pip install --pre "secgraphai[research]"      # PDF research import
+python -m pip install --pre "secgraphai[all]"           # all optional features and development tools
 ```
 
 Confirm the installation and create a safe starter configuration:
@@ -792,8 +805,9 @@ remain release or integration responsibilities:
 - NVD synchronization supports paging, conditional requests, and modified-date deltas;
   operators remain responsible for scheduling queries and deciding cache-freshness policy;
 - probabilistic model judgments require human review for consequential decisions;
-- an independent pre-1.0 security review, release signing, and publishing are maintainer
-  actions rather than package runtime features.
+- the release candidate is published with PyPI trusted publishing and GitHub build
+  provenance; independent security review and the final 1.0 release remain maintainer
+  responsibilities rather than package runtime features.
 
 For the complete requirements and threat assumptions, read
 [`SecGraphAI_PRD_v3.1_CVE_OWASP.md`](../SecGraphAI_PRD_v3.1_CVE_OWASP.md),
