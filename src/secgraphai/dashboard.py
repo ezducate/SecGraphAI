@@ -9,8 +9,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-from secgraphai.core import Report
-from secgraphai.intelligence import OWASP_PROFILES, coverage
+from secgraphai.core import Report, Verdict
+from secgraphai.intelligence import OWASP_PROFILES, CoverageState, coverage_matrix
 from secgraphai.lifecycle import regression_bundle
 from secgraphai.policy import Effect, PolicyEngine, Rule
 from secgraphai.self_security import run_self_audit
@@ -219,14 +219,23 @@ def create_app(
     def owasp_coverage(profile: str = "llm-2026") -> dict[str, object]:
         if profile not in OWASP_PROFILES:
             raise HTTPException(status_code=404, detail="unknown OWASP profile")
-        observed = {
-            category
+        state_by_verdict = {
+            Verdict.VERIFIED_VIOLATION: CoverageState.VERIFIED_FINDING,
+            Verdict.LIKELY_VIOLATION: CoverageState.PARTIAL,
+            Verdict.BLOCKED_BY_CONTROL: CoverageState.VERIFIED_CONTROL,
+            Verdict.TEST_ERROR: CoverageState.TEST_ERROR,
+            Verdict.PASS: CoverageState.TESTED,
+            Verdict.INCONCLUSIVE: CoverageState.PARTIAL,
+            Verdict.OUT_OF_SCOPE: CoverageState.NOT_APPLICABLE,
+        }
+        observed = [
+            (category.split(":", 1)[0], state_by_verdict[finding_item.verdict])
             for report in storage.list(limit=1000)
             for finding_item in report.findings
             for categories in finding_item.mappings.values()
             for category in categories
-        }
-        return coverage(profile, observed)
+        ]
+        return coverage_matrix(profile, observed)
 
     @app.websocket("/api/v1/events")
     async def events(websocket: WebSocket) -> None:

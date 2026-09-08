@@ -155,20 +155,44 @@ def load_replay(path: str | Path, max_bytes: int = 10_000_000) -> tuple[Report, 
 def pytest_regression(finding: Finding) -> str:
     marker = next((e.observed for e in finding.evidence if e.observed), "forbidden marker")
     return (
-        "def test_secgraph_regression(target):\n"
+        "import pytest\n\n"
+        "@pytest.mark.secgraph\n"
+        f"def test_secgraph_regression_{_python_name(finding.id)}(target):\n"
         f"    output = target({json.dumps(finding.title)})\n"
         f"    assert {json.dumps(marker)} not in output\n"
     )
 
 
 def regression_bundle(finding: Finding) -> dict[str, str]:
+    yaml_case = {
+        "schema": "secgraph-regression/1.0",
+        "id": finding.id,
+        "fingerprint": fingerprint(finding),
+        "invariant": finding.invariant,
+        "expected": "PASS",
+        "forbidden_verdicts": ["VERIFIED_VIOLATION", "LIKELY_VIOLATION", "TEST_ERROR"],
+    }
+    junit = Element("testsuite", name="secgraph-regression", tests="1")
+    SubElement(junit, "testcase", classname="secgraphai.generated", name=finding.id)
     return {
         "pytest": pytest_regression(finding),
-        "yaml": json.dumps(
-            {"id": finding.id, "fingerprint": fingerprint(finding), "expected": "PASS"}, indent=2
+        "yaml": json.dumps(yaml_case, indent=2),
+        "junit": tostring(junit, encoding="unicode"),
+        "policy": json.dumps(
+            {
+                "fail_on_new": ["CRITICAL", "HIGH"],
+                "fail_on_test_error": True,
+                "required_fingerprints": [fingerprint(finding)],
+            },
+            indent=2,
         ),
         "ci": f"secgraph replay {finding.id} --fail-on-violation",
     }
+
+
+def _python_name(value: str) -> str:
+    result = re.sub(r"[^A-Za-z0-9_]", "_", value).lower()
+    return result if not result[:1].isdigit() else f"finding_{result}"
 
 
 class BaselineStore:

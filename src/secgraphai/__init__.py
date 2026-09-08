@@ -1,9 +1,26 @@
 """Public API for SecGraphAI."""
 
-from secgraphai.attacks import Attack, AttackMemory, AttackPack, AttackPlanner, PackTrust
+from secgraphai.attacks import (
+    Attack,
+    AttackMapping,
+    AttackMemory,
+    AttackPack,
+    AttackPlanner,
+    PackTrust,
+    load_official_pack,
+)
 from secgraphai.canary import CanaryFactory
 from secgraphai.config import Config, Mode
-from secgraphai.core import Evidence, Finding, Interaction, Report, ScanManifest, Severity, Verdict
+from secgraphai.core import (
+    Evidence,
+    Finding,
+    Interaction,
+    Report,
+    ScanManifest,
+    Severity,
+    Verdict,
+    Verification,
+)
 from secgraphai.graph import EdgeType, NodeType, SecurityGraph
 from secgraphai.invariants import Invariant, InvariantEngine, invariant
 from secgraphai.model import Model
@@ -17,6 +34,7 @@ canary = CanaryFactory()
 __all__ = [
     "Attack",
     "AttackMemory",
+    "AttackMapping",
     "AttackPack",
     "AttackPlanner",
     "Config",
@@ -43,7 +61,9 @@ __all__ = [
     "ScanManifest",
     "Tainted",
     "Verdict",
+    "Verification",
     "canary",
     "invariant",
+    "load_official_pack",
     "secgraph",
 ]

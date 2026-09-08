@@ -35,12 +35,39 @@ def to_html(report: Report) -> str:
             )
             + "</tr>"
         )
+    summary = "".join(
+        f"<li><strong>{html.escape(key)}</strong>: {value}</li>"
+        for key, value in report.summary().items()
+        if value
+    )
+    resources = "".join(
+        f"<li><strong>{html.escape(key)}</strong>: {value}</li>"
+        for key, value in report.resources().items()
+    )
+    limitations = "".join(f"<li>{html.escape(str(item))}</li>" for item in report.limitations)
+    manifest = html.escape(json.dumps(redact(report.manifest.model_dump(mode="json")), indent=2))
     template = """<!doctype html><html><head><meta charset=\"utf-8\"><title>SecGraphAI report</title>
-<style>body{font:16px system-ui;margin:2rem;color:#172033}table{border-collapse:collapse;width:100%}
-th,td{padding:.6rem;border:1px solid #ccd3df;text-align:left}th{background:#edf2f7}</style></head>
-<body><h1>SecGraphAI security report</h1><p>Scan: %s</p><table><thead><tr><th>ID</th>
-<th>Severity</th><th>Verdict</th><th>Finding</th></tr></thead><tbody>%s</tbody></table></body></html>"""
-    return template.replace("%s", html.escape(report.scan_id), 1).replace("%s", "".join(rows), 1)
+<meta name=\"referrer\" content=\"no-referrer\"><style>body{font:16px system-ui;margin:2rem;color:#172033;max-width:1200px}
+table{border-collapse:collapse;width:100%}th,td{padding:.6rem;border:1px solid #ccd3df;text-align:left}
+th{background:#edf2f7}section{margin:2rem 0}pre{white-space:pre-wrap;background:#f5f7fa;padding:1rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem}</style></head>
+<body><h1>SecGraphAI security report</h1><p>Scan: %s</p>
+<section class=\"grid\"><div><h2>Executive summary</h2><ul>%s</ul></div>
+<div><h2>Resources</h2><ul>%s</ul></div></section>
+<section><h2>Security engineering findings</h2><table><thead><tr><th>ID</th>
+<th>Severity</th><th>Verdict</th><th>Finding</th></tr></thead><tbody>%s</tbody></table></section>
+<section><h2>Audit evidence</h2><h3>Limitations</h3><ul>%s</ul><h3>Manifest</h3><pre>%s</pre></section>
+</body></html>"""
+    for value in (
+        html.escape(report.scan_id),
+        summary,
+        resources,
+        "".join(rows),
+        limitations,
+        manifest,
+    ):
+        template = template.replace("%s", value, 1)
+    return template
 
 
 def to_markdown(report: Report) -> str:
@@ -59,6 +86,21 @@ def to_markdown(report: Report) -> str:
         f"| {safe(item.id)} | {item.severity.value} | {item.verdict.value} | {safe(item.title)} |"
         for item in report.findings
     )
+    rows.extend(["", "## Resource usage", ""])
+    rows.extend(f"- {safe(key)}: {value}" for key, value in report.resources().items())
+    rows.extend(
+        [
+            "",
+            "## Audit manifest",
+            "",
+            "```json",
+            json.dumps(redact(report.manifest.model_dump(mode="json")), indent=2),
+            "```",
+        ]
+    )
+    if report.limitations:
+        rows.extend(["", "## Limitations", ""])
+        rows.extend(f"- {safe(item)}" for item in report.limitations)
     return "\n".join(rows) + "\n"
 
 

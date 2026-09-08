@@ -30,11 +30,37 @@ ATTACK_PACK_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "required": ["id", "family", "prompt"],
+                "additionalProperties": False,
                 "properties": {
                     "id": {"type": "string"},
                     "family": {"type": "string"},
                     "prompt": {"type": "string"},
                     "cost": {"type": "integer", "minimum": 1},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "source": {"type": "string"},
+                    "target_invariant": {"type": ["string", "null"]},
+                    "conversation_depth": {"type": "integer", "minimum": 1},
+                    "mappings": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "framework",
+                                "version",
+                                "category",
+                                "strength",
+                                "rationale",
+                            ],
+                            "properties": {
+                                "framework": {"type": "string"},
+                                "version": {"type": "string"},
+                                "category": {"type": "string"},
+                                "strength": {"enum": ["weak", "moderate", "strong"]},
+                                "rationale": {"type": "string"},
+                            },
+                        },
+                    },
                 },
             },
         },

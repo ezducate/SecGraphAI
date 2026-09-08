@@ -33,6 +33,12 @@ class Severity(StrEnum):
     CRITICAL = "CRITICAL"
 
 
+class Verification(StrEnum):
+    DETERMINISTIC = "DETERMINISTIC"
+    PROBABILISTIC = "PROBABILISTIC"
+    DERIVED = "DERIVED"
+
+
 class Evidence(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     kind: str
@@ -84,6 +90,7 @@ class Finding(BaseModel):
     severity: Severity
     verdict: Verdict
     confidence: float = Field(ge=0, le=1)
+    verification: Verification = Verification.DETERMINISTIC
     actor: str | None = None
     asset: str | None = None
     invariant: str | None = None
@@ -117,6 +124,16 @@ class Report(BaseModel):
         # Errors may also have a corresponding finding; count each failed test once.
         result[Verdict.TEST_ERROR.value] = max(result[Verdict.TEST_ERROR.value], len(self.errors))
         return result
+
+    def resources(self) -> dict[str, float | int]:
+        """Aggregate reproducible resource and cost signals from scan interactions."""
+        return {
+            "input_tokens": sum(item.input_tokens for item in self.interactions),
+            "output_tokens": sum(item.output_tokens for item in self.interactions),
+            "model_calls": sum(item.model_calls for item in self.interactions),
+            "tool_calls": sum(item.tool_calls for item in self.interactions),
+            "wall_time_ms": round(sum(item.duration_ms for item in self.interactions), 3),
+        }
 
     def save(self, path: str | Path, format: str | None = None) -> None:
         """Save using the safe report renderer selected by the file extension."""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import json
 import os
@@ -15,17 +16,19 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
-from secgraphai.attacks import load_pack
-from secgraphai.core import Report
+from secgraphai.attacks import load_official_pack, load_pack
+from secgraphai.core import Report, Verdict
 from secgraphai.dashboard import create_app
 from secgraphai.discovery import discover_path, discover_url
 from secgraphai.intelligence import (
+    CoverageState,
     NVDClient,
     VulnerabilityCache,
     affected,
     generate_cyclonedx,
     generate_spdx,
     installed_components,
+    owasp_gate,
     parse_cyclonedx,
     parse_spdx,
     security_gate,
@@ -63,6 +66,7 @@ pack_app = typer.Typer(help="Inspect signed attack packs.")
 plugin_app = typer.Typer(help="Audit external plugins.")
 research_app = typer.Typer(help="Import security research as disabled draft packs.")
 model_app = typer.Typer(help="Inspect model supply-chain artifacts.")
+owasp_app = typer.Typer(help="Measure and gate versioned OWASP coverage.")
 app.add_typer(policy_app, name="policy")
 app.add_typer(baseline_app, name="baseline")
 app.add_typer(bundle_app, name="bundle")
@@ -73,6 +77,7 @@ app.add_typer(pack_app, name="packs")
 app.add_typer(plugin_app, name="plugins")
 app.add_typer(research_app, name="research")
 app.add_typer(model_app, name="model")
+app.add_typer(owasp_app, name="owasp")
 
 _STARTER = {
     "mode": "SAFE",
@@ -457,6 +462,50 @@ def cve_reachable(cache: Annotated[Path, typer.Option("--cache")] = Path("cve-ca
     typer.echo(json.dumps(matches, default=list))
 
 
+def _owasp_results(report: Report) -> list[tuple[str, CoverageState]]:
+    states = {
+        Verdict.VERIFIED_VIOLATION: CoverageState.VERIFIED_FINDING,
+        Verdict.LIKELY_VIOLATION: CoverageState.PARTIAL,
+        Verdict.BLOCKED_BY_CONTROL: CoverageState.VERIFIED_CONTROL,
+        Verdict.TEST_ERROR: CoverageState.TEST_ERROR,
+        Verdict.PASS: CoverageState.TESTED,
+        Verdict.INCONCLUSIVE: CoverageState.PARTIAL,
+        Verdict.OUT_OF_SCOPE: CoverageState.NOT_APPLICABLE,
+    }
+    return [
+        (category.split(":", 1)[0], states[finding.verdict])
+        for finding in report.findings
+        for categories in finding.mappings.values()
+        for category in categories
+    ]
+
+
+@owasp_app.command("coverage")
+def owasp_coverage(
+    report: Annotated[Path, typer.Argument()],
+    profile: Annotated[str, typer.Option("--profile")] = "llm-2026",
+) -> None:
+    value = Report.model_validate_json(report.read_text(encoding="utf-8"))
+    _, matrix = owasp_gate(profile, _owasp_results(value), minimum_percent=0)
+    typer.echo(json.dumps(matrix, indent=2))
+
+
+@owasp_app.command("gate")
+def owasp_regression_gate(
+    report: Annotated[Path, typer.Argument()],
+    profile: Annotated[str, typer.Option("--profile")] = "llm-2026",
+    minimum: Annotated[float, typer.Option("--minimum-percent")] = 100,
+) -> None:
+    value = Report.model_validate_json(report.read_text(encoding="utf-8"))
+    try:
+        passed, matrix = owasp_gate(profile, _owasp_results(value), minimum_percent=minimum)
+    except KeyError as exc:
+        raise typer.BadParameter("unknown OWASP profile") from exc
+    typer.echo(json.dumps(matrix, indent=2))
+    if not passed:
+        raise typer.Exit(1)
+
+
 @sbom_app.command("generate")
 def sbom_generate(
     output: Annotated[Path, typer.Option("--output", "-o")] = Path("bom.json"),
@@ -491,9 +540,26 @@ def sbom_scan(
 def pack_verify(
     path: Annotated[Path, typer.Argument()],
     allow_unverified: Annotated[bool, typer.Option("--allow-unverified")] = False,
+    public_key: Annotated[Path | None, typer.Option("--public-key")] = None,
 ) -> None:
-    pack = load_pack(path, allow_unverified=allow_unverified)
+    key = base64.b64decode(public_key.read_text().strip()) if public_key else None
+    pack = load_pack(path, allow_unverified=allow_unverified, public_key=key)
     typer.echo(json.dumps({"id": pack.id, "version": pack.version, "trust": pack.trust.value}))
+
+
+@pack_app.command("official")
+def pack_official(name: Annotated[str, typer.Argument()] = "prompt_injection_core") -> None:
+    pack = load_official_pack(name)
+    typer.echo(
+        json.dumps(
+            {
+                "id": pack.id,
+                "version": pack.version,
+                "trust": pack.trust.value,
+                "attacks": len(pack.attacks),
+            }
+        )
+    )
 
 
 @plugin_app.command("audit")

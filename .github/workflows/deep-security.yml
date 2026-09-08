@@ -1,0 +1,43 @@
+name: Deep security
+
+on:
+  schedule:
+    - cron: '29 4 * * 6'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -e '.[test,security]' 'mutmut>=3,<4'
+      - run: mutmut run
+      - run: mutmut show
+
+  fuzz-and-dynamic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -e '.[test,api,fuzz]'
+      - run: pytest -q tests/test_prd_properties.py tests/test_prd_scanner_dashboard.py tests/test_prd_benchmark.py
+      - run: python fuzz/fuzz_parsers.py -runs=10000 -max_len=65536
+
+  self-dogfood:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -e '.[test,api,security]'
+      - run: python -m secgraphai.cli self-audit --deep
+      - run: pytest -q tests/test_prd_scanner_dashboard.py tests/test_prd_security_branches.py

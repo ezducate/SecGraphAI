@@ -22,6 +22,11 @@ class Refund(BaseModel):
     amount: float = Field(gt=0, le=100_000)
 
 
+class Email(BaseModel):
+    destination: str
+    content: str = Field(max_length=10_000)
+
+
 def create_demo(*, hardened: bool) -> FastAPI:
     app = FastAPI(title=f"SecGraph Bank ({'hardened' if hardened else 'vulnerable'})")
 
@@ -50,7 +55,22 @@ def create_demo(*, hardened: bool) -> FastAPI:
         injected = "ignore previous" in prompt.casefold()
         if hardened and injected:
             return {"answer": "request rejected", "tools": []}
-        return {"answer": "processed", "tools": ["email", "refund"] if injected else []}
+        recursion = 100 if "loop" in prompt.casefold() and not hardened else 3
+        return {
+            "answer": "processed",
+            "tools": ["email", "refund"] if injected else [],
+            "tool_calls": recursion if "loop" in prompt.casefold() else 0,
+        }
+
+    @app.post("/email")
+    def email(value: Email) -> dict[str, str]:
+        external = not value.destination.casefold().endswith("@example.test")
+        sensitive = any(
+            marker in value.content.casefold() for marker in ("ssn", "secret", "api_key")
+        )
+        if hardened and external and sensitive:
+            raise HTTPException(403, "sensitive external flow blocked")
+        return {"status": "sent"}
 
     return app
 

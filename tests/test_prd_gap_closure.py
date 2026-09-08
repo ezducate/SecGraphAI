@@ -6,19 +6,29 @@ import pytest
 import respx
 from httpx import Response
 
-from secgraphai.attacks import Attack, AttackMemory, AttackPlanner
+from secgraphai.adapters import normalize_engine_output
+from secgraphai.attacks import (
+    BUILTIN_ATTACKS,
+    Attack,
+    AttackMemory,
+    AttackPlanner,
+    load_official_pack,
+)
 from secgraphai.core import Evidence, Finding, Report, Severity, Verdict
 from secgraphai.discovery import discover_path
 from secgraphai.graph import EdgeType, NodeType, SecurityGraph
 from secgraphai.intelligence import (
     Component,
+    CoverageState,
     Vulnerability,
     VulnerabilityCache,
     affected,
+    owasp_gate,
     parse_nvd,
 )
 from secgraphai.model import Model
 from secgraphai.policy import Effect, PolicyEngine, Rule
+from secgraphai.reporting import to_html, to_markdown
 from secgraphai.runtime import PolicyDenied, RuntimePolicyAspect, SecurityContext
 from secgraphai.scanner import SecGraph
 from secgraphai.security_modules import (
@@ -27,6 +37,7 @@ from secgraphai.security_modules import (
     MCPSecurityModule,
     RAGSecurityModule,
 )
+from secgraphai.self_security import run_self_audit
 from secgraphai.storage import Storage
 from secgraphai.targets import MCPClient, RAGDocument, RAGTarget
 from secgraphai.validators import Validation, ValidationContext
@@ -344,3 +355,65 @@ def test_nvd_cpe_ranges_and_corrupt_cache_are_not_marked_safe(tmp_path):
     path.write_text("not-json", encoding="utf-8")
     with pytest.raises(ValueError, match="corrupt"):
         VulnerabilityCache(path).search("demo")
+
+
+def test_official_pack_and_builtin_owasp_mappings_are_reviewable():
+    pack = load_official_pack()
+    assert pack.trust.value == "TRUSTED_OFFICIAL" and pack.signature
+    assert all(
+        attack.mappings
+        and all(
+            mapping.version and mapping.strength == "strong" and mapping.rationale
+            for mapping in attack.mappings
+        )
+        for attack in BUILTIN_ATTACKS
+    )
+
+
+def test_owasp_test_error_is_never_counted_as_covered():
+    passed, matrix = owasp_gate(
+        "llm-2026",
+        [
+            ("LLM01", CoverageState.TEST_ERROR),
+            *((f"LLM{index:02d}", CoverageState.TESTED) for index in range(2, 11)),
+        ],
+        minimum_percent=90,
+    )
+    assert passed is False
+    assert matrix["percent"] == 90.0
+    assert matrix["states"]["LLM01"] == "TEST_ERROR"
+
+
+def test_native_external_engine_formats_are_normalized():
+    semgrep = normalize_engine_output(
+        "semgrep",
+        {
+            "results": [
+                {
+                    "check_id": "python.lang.issue",
+                    "extra": {
+                        "message": "unsafe call",
+                        "severity": "ERROR",
+                        "metadata": {"cwe": ["CWE-78"]},
+                    },
+                }
+            ]
+        },
+    )
+    assert semgrep[0]["severity"] == "HIGH" and semgrep[0]["mappings"]["CWE"] == ["CWE-78"]
+
+
+def test_reports_include_audience_resources_manifest_and_self_audit_checks(tmp_path):
+    report = Report(scan_id="audience", limitations=["authorized scope only"])
+    assert "Executive summary" in to_html(report)
+    assert "## Resource usage" in to_markdown(report)
+    audit = run_self_audit(
+        config={"dashboard": {"host": "127.0.0.1"}}, database=tmp_path / "missing"
+    )
+    names = {item.name for item in audit.checks}
+    assert {
+        "Package integrity",
+        "Plugin signatures",
+        "Dashboard bind",
+        "TLS configuration",
+    } <= names

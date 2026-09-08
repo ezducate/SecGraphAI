@@ -16,7 +16,16 @@ from urllib.parse import urlsplit
 
 from secgraphai.attacks import Attack, AttackPlanner, evolve
 from secgraphai.canary import CanaryFactory
-from secgraphai.core import Evidence, Finding, Interaction, Report, ScanManifest, Severity, Verdict
+from secgraphai.core import (
+    Evidence,
+    Finding,
+    Interaction,
+    Report,
+    ScanManifest,
+    Severity,
+    Verdict,
+    Verification,
+)
 from secgraphai.invariants import Invariant, InvariantEngine
 from secgraphai.lifecycle import finalize_report
 from secgraphai.security import Scope, ScopeGuard, redact
@@ -220,6 +229,7 @@ class SecGraph:
                                 severity=Severity.MEDIUM,
                                 verdict=judged.verdict,
                                 confidence=judged.confidence,
+                                verification=Verification.PROBABILISTIC,
                                 evidence=list(judged.evidence),
                             )
                         )
@@ -275,8 +285,13 @@ class SecGraph:
             errors=errors,
             interactions=interactions,
             manifest=ScanManifest(
-                target_hash=hashlib.sha256(manifest_payload).hexdigest(), seed=self.seed
+                target_hash=hashlib.sha256(manifest_payload).hexdigest(),
+                seed=self.seed,
+                tool_schemas=dict((self.target or {}).get("tool_schemas") or {}),
+                retrieval_settings=dict((self.target or {}).get("retrieval_settings") or {}),
+                model_parameters=dict((self.target or {}).get("model_parameters") or {}),
             ),
+            graph=dict((self.target or {}).get("graph") or {}),
         )
         return finalize_report(
             report,

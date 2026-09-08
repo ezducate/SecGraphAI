@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -40,6 +42,7 @@ class PluginManifest:
     trust: PluginTrust = PluginTrust.LOCAL
     output_schema: dict[str, Any] | None = None
     max_output_bytes: int = 2_000_000
+    artifact_sha256: str | None = None
 
 
 def run_plugin(
@@ -58,6 +61,12 @@ def run_plugin(
     executable = shutil.which(manifest.command[0])
     if not executable:
         raise FileNotFoundError("plugin executable is not installed")
+    if manifest.trust in {PluginTrust.TRUSTED, PluginTrust.ORGANIZATION}:
+        if not manifest.artifact_sha256:
+            raise PermissionError("trusted plugin requires an artifact SHA-256")
+        digest = _file_sha256(Path(executable))
+        if not hmac.compare_digest(digest, manifest.artifact_sha256):
+            raise PermissionError("plugin artifact SHA-256 mismatch")
     safe_payload = json.dumps(payload, separators=(",", ":"))
     if len(safe_payload.encode()) > 2_000_000:
         raise ValueError("plugin input exceeds size limit")
@@ -90,6 +99,14 @@ def run_plugin(
     return value
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def load_manifest(path: str | Path) -> PluginManifest:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or not isinstance(raw.get("command"), list):
@@ -104,6 +121,7 @@ def load_manifest(path: str | Path) -> PluginManifest:
         trust=PluginTrust(raw.get("trust", "local")),
         output_schema=raw.get("output_schema"),
         max_output_bytes=int(raw.get("max_output_bytes", 2_000_000)),
+        artifact_sha256=str(raw["artifact_sha256"]) if raw.get("artifact_sha256") else None,
     )
 
 
@@ -120,4 +138,9 @@ def audit_plugins(manifests: Iterable[PluginManifest]) -> list[str]:
             problems.append(f"plugin requests raw credentials: {manifest.name}")
         if not manifest.output_schema:
             problems.append(f"plugin has no output schema: {manifest.name}")
+        if (
+            manifest.trust in {PluginTrust.TRUSTED, PluginTrust.ORGANIZATION}
+            and not manifest.artifact_sha256
+        ):
+            problems.append(f"trusted plugin has no artifact SHA-256: {manifest.name}")
     return problems

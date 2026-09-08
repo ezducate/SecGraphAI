@@ -27,6 +27,7 @@ def files(tmp_path):
                 verdict=Verdict.VERIFIED_VIOLATION,
                 confidence=1,
                 evidence=[Evidence(kind="marker", description="x", observed="MARK")],
+                mappings={"OWASP_LLM_2026": ["LLM01"]},
             )
         ],
     )
@@ -70,6 +71,8 @@ def test_cli_lifecycle_policy_report_and_baseline(tmp_path):
     invoke(["bundle", "create", report_path, bundle])
     invoke(["bundle", "replay", bundle])
     invoke(["replay", bundle])
+    invoke(["owasp", "coverage", report_path])
+    invoke(["owasp", "gate", report_path, "--minimum-percent", "10"])
 
 
 def test_cli_cve_sbom_pack_plugin_engines_and_openapi(tmp_path):
@@ -98,6 +101,7 @@ def test_cli_cve_sbom_pack_plugin_engines_and_openapi(tmp_path):
         )
     )
     invoke(["packs", "verify", pack])
+    invoke(["packs", "official"])
     manifest = tmp_path / "plugin.json"
     manifest.write_text(
         json.dumps(

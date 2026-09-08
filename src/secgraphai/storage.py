@@ -89,7 +89,7 @@ class Storage:
             )
             for table in ("findings", "events", "attack_paths", "graph_nodes", "graph_edges"):
                 connection.execute(
-                    f"DELETE FROM {table} WHERE scan_id = ?",  # noqa: S608 - fixed allow-list
+                    f"DELETE FROM {table} WHERE scan_id = ?",  # nosec B608  # noqa: S608
                     (report.scan_id,),
                 )
             for finding in report.findings:
@@ -167,7 +167,7 @@ class Storage:
             raise ValueError("invalid pagination")
         with self._connect() as connection:
             rows = connection.execute(
-                f"SELECT document FROM {table} ORDER BY created_at DESC LIMIT ?",  # noqa: S608
+                f"SELECT document FROM {table} ORDER BY created_at DESC LIMIT ?",  # nosec B608  # noqa: S608
                 (limit,),
             ).fetchall()
         return [json.loads(str(row["document"])) for row in rows]

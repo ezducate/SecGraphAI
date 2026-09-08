@@ -58,6 +58,16 @@ class Reachability(StrEnum):
     NOT_AFFECTED = "NOT_AFFECTED"
 
 
+class CoverageState(StrEnum):
+    NOT_APPLICABLE = "NOT_APPLICABLE"
+    DISCOVERED = "DISCOVERED"
+    PARTIAL = "PARTIAL"
+    TESTED = "TESTED"
+    VERIFIED_CONTROL = "VERIFIED_CONTROL"
+    VERIFIED_FINDING = "VERIFIED_FINDING"
+    TEST_ERROR = "TEST_ERROR"
+
+
 @dataclass(frozen=True)
 class Vulnerability:
     id: str
@@ -543,4 +553,69 @@ def coverage(profile: str, observed: Iterable[str]) -> dict[str, object]:
         "covered": sorted(covered),
         "missing": sorted(required - covered),
         "percent": round(100 * len(covered) / len(required), 1),
+        "states": {
+            category: (
+                CoverageState.TESTED.value
+                if category in covered
+                else CoverageState.DISCOVERED.value
+            )
+            for category in sorted(required)
+        },
     }
+
+
+def coverage_matrix(
+    profile: str, results: Iterable[tuple[str, CoverageState | str]]
+) -> dict[str, object]:
+    required = OWASP_PROFILES[profile]
+    priority = {
+        CoverageState.NOT_APPLICABLE: 0,
+        CoverageState.DISCOVERED: 1,
+        CoverageState.PARTIAL: 2,
+        CoverageState.TESTED: 3,
+        CoverageState.VERIFIED_CONTROL: 4,
+        CoverageState.VERIFIED_FINDING: 4,
+        CoverageState.TEST_ERROR: -1,
+    }
+    states = {category: CoverageState.DISCOVERED for category in required}
+    for category, raw_state in results:
+        if category not in required:
+            continue
+        state = CoverageState(raw_state)
+        current = states[category]
+        if state == CoverageState.TEST_ERROR or priority[state] > priority[current]:
+            states[category] = state
+    covered_states = {
+        CoverageState.TESTED,
+        CoverageState.VERIFIED_CONTROL,
+        CoverageState.VERIFIED_FINDING,
+    }
+    covered = {category for category, state in states.items() if state in covered_states}
+    return {
+        "profile": profile,
+        "covered": sorted(covered),
+        "missing": sorted(required - covered),
+        "percent": round(100 * len(covered) / len(required), 1),
+        "states": {key: value.value for key, value in sorted(states.items())},
+        "test_errors": sorted(
+            category for category, state in states.items() if state == CoverageState.TEST_ERROR
+        ),
+    }
+
+
+def owasp_gate(
+    profile: str,
+    results: Iterable[tuple[str, CoverageState | str]],
+    *,
+    minimum_percent: float = 100,
+) -> tuple[bool, dict[str, object]]:
+    matrix = coverage_matrix(profile, results)
+    percent = matrix["percent"]
+    errors = matrix["test_errors"]
+    passed = (
+        isinstance(percent, (int, float))
+        and percent >= minimum_percent
+        and isinstance(errors, list)
+        and not errors
+    )
+    return passed, matrix

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
+import hmac
 import importlib.metadata
 import json
 import os
@@ -61,7 +64,25 @@ def package_integrity() -> AuditCheck:
     record = distribution.read_text("RECORD")
     if not record:
         return AuditCheck("Package integrity", AuditStatus.WARN, "distribution has no RECORD")
-    return AuditCheck("Package integrity", AuditStatus.PASS, "installed distribution has RECORD")
+    mismatches = []
+    for relative_path, encoded_hash, _size in csv.reader(record.splitlines()):
+        if not encoded_hash or not encoded_hash.startswith("sha256="):
+            continue
+        installed = Path(str(distribution.locate_file(relative_path)))
+        if not installed.is_file():
+            mismatches.append(relative_path)
+            continue
+        expected = encoded_hash.removeprefix("sha256=")
+        actual = base64.urlsafe_b64encode(_sha256_file(installed)).decode().rstrip("=")
+        if not hmac.compare_digest(actual, expected):
+            mismatches.append(relative_path)
+    if mismatches:
+        return AuditCheck(
+            "Package integrity",
+            AuditStatus.FAIL,
+            f"{len(mismatches)} installed file hashes do not match RECORD",
+        )
+    return AuditCheck("Package integrity", AuditStatus.PASS, "installed RECORD hashes verified")
 
 
 def dependency_audit(deep: bool = False) -> AuditCheck:
@@ -103,9 +124,15 @@ def run_self_audit(
     packs: Iterable[AttackPack] = (),
     deep: bool = False,
 ) -> AuditReport:
-    plugin_problems = audit_plugins(plugins)
-    unverified = [pack.id for pack in packs if pack.trust == PackTrust.UNVERIFIED_COMMUNITY]
+    plugin_values = tuple(plugins)
+    pack_values = tuple(packs)
+    plugin_problems = audit_plugins(plugin_values)
+    unverified = [pack.id for pack in pack_values if pack.trust == PackTrust.UNVERIFIED_COMMUNITY]
     config_problems = doctor(dict(config or {})) if config is not None else []
+    dashboard_raw = config.get("dashboard") if config is not None else None
+    dashboard = dict(dashboard_raw) if isinstance(dashboard_raw, dict) else {}
+    dashboard_host = str(dashboard.get("host", "127.0.0.1"))
+    dashboard_local = dashboard_host in {"127.0.0.1", "localhost", "::1"}
     secret_probe = {"api_key": "SG-SECRET"}
     checks = [
         package_integrity(),
@@ -114,6 +141,15 @@ def run_self_audit(
             "Unexpected plugins",
             AuditStatus.FAIL if plugin_problems else AuditStatus.PASS,
             "; ".join(plugin_problems),
+        ),
+        AuditCheck(
+            "Plugin signatures",
+            AuditStatus.FAIL
+            if any(
+                item.trust.value in {"trusted", "organization"} and not item.artifact_sha256
+                for item in plugin_values
+            )
+            else AuditStatus.PASS,
         ),
         AuditCheck(
             "Attack pack signatures",
@@ -130,6 +166,17 @@ def run_self_audit(
         permissions_check(config_path, "Config permissions"),
         permissions_check(database, "Database permissions"),
         AuditCheck(
+            "Dashboard bind",
+            AuditStatus.PASS if dashboard_local else AuditStatus.FAIL,
+            dashboard_host,
+        ),
+        AuditCheck(
+            "TLS configuration",
+            AuditStatus.NA
+            if dashboard_local
+            else (AuditStatus.PASS if dashboard.get("tls") else AuditStatus.FAIL),
+        ),
+        AuditCheck(
             "Secret exposure",
             AuditStatus.PASS
             if redact(secret_probe)["api_key"] == "[REDACTED]"
@@ -145,8 +192,21 @@ def run_self_audit(
             else AuditStatus.PASS,
             "secret-like environment variables are present",
         ),
+        AuditCheck(
+            "Version freshness",
+            AuditStatus.WARN,
+            "offline audit does not query a package index",
+        ),
     ]
     digest = hashlib.sha256(
         json.dumps([item.__dict__ for item in checks], sort_keys=True, default=str).encode()
     ).hexdigest()
     return AuditReport(tuple(checks), {"audit_sha256": digest})
+
+
+def _sha256_file(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
