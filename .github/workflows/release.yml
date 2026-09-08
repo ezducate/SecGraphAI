@@ -24,7 +24,7 @@ jobs:
       - run: python -m pip_audit
       - run: python -m secgraphai.cli sbom generate --output secgraphai.cdx.json
       - run: python -m build
-      - uses: actions/attest-build-provenance@v3
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: 'dist/*'
       - uses: pypa/gh-action-pypi-publish@release/v1
