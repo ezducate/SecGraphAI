@@ -28,7 +28,7 @@ def inspect_media(path: str | Path, *, max_bytes: int = 50_000_000) -> MediaArti
         text = content.decode("utf-8", "replace")
     elif media_type == "application/pdf":
         try:
-            from pypdf import PdfReader  # type: ignore[import-not-found]
+            from pypdf import PdfReader
         except ImportError:
             text = ""
         else:

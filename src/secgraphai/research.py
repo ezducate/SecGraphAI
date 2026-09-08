@@ -16,7 +16,7 @@ def extract_text(path: str | Path, *, max_bytes: int = 20_000_000) -> str:
         raise ValueError("research document exceeds size limit")
     if target.suffix.casefold() == ".pdf":
         try:
-            from pypdf import PdfReader  # type: ignore[import-not-found]
+            from pypdf import PdfReader
         except ImportError as exc:
             raise RuntimeError("PDF research import requires the research extra") from exc
         reader = PdfReader(target)
