@@ -7,7 +7,11 @@ from typer.main import get_command
 from secgraphai.cli import app
 from secgraphai.core import ScanManifest
 
-ROOT = Path(__file__).parents[1]
+ROOT = next(
+    candidate
+    for candidate in (Path.cwd(), *Path(__file__).parents)
+    if (candidate / "pyproject.toml").exists()
+)
 
 
 def _leaf_commands(command: Command, prefix: tuple[str, ...] = ()):
