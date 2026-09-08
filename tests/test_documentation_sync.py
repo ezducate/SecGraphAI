@@ -10,7 +10,7 @@ from secgraphai.core import ScanManifest
 ROOT = next(
     candidate
     for candidate in (Path.cwd(), *Path(__file__).parents)
-    if (candidate / "pyproject.toml").exists()
+    if (candidate / "pyproject.toml").exists() and (candidate / "README.md").exists()
 )
 
 
