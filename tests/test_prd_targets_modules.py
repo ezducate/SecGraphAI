@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+
 import httpx
 import pytest
 
 from demo.app import hardened_app, vulnerable_app
+from secgraphai import DiscoveryInventory, discover_mcp, discover_path
+from secgraphai.graph import EdgeType, NodeType
 from secgraphai.security import Scope, ScopeGuard
 from secgraphai.security_modules import (
     AgentSecurityModule,
@@ -101,3 +106,53 @@ def test_prompt_injection_family_coverage():
     cases = prompt_injection_cases()
     assert len(cases) >= 10
     assert {item.source for item in cases} >= {"user", "rag", "tool", "mcp", "memory"}
+
+
+@pytest.mark.asyncio
+async def test_mcp_capability_discovery_builds_inventory_and_graph():
+    def transport(method, params):
+        return {
+            "initialize": {"serverInfo": {"name": "billing"}},
+            "tools/list": {"tools": [{"name": "refund", "description": "refund"}]},
+            "resources/list": {"resources": [{"uri": "customer://records"}]},
+            "prompts/list": {"prompts": [{"name": "support"}]},
+        }[method]
+
+    inventory = await discover_mcp(MCPClient(transport), source="test-server")
+    assert isinstance(inventory, DiscoveryInventory)
+    assert inventory.counts() == {
+        "mcp_resource": 1,
+        "mcp_server": 1,
+        "prompt": 1,
+        "tool": 1,
+    }
+    graph = inventory.to_graph()
+    kinds = {attributes["kind"] for _, attributes in graph.nodes}
+    assert {NodeType.MCP_SERVER.value, NodeType.MCP_RESOURCE.value, NodeType.PROMPT.value} <= kinds
+    assert {attributes["kind"] for _, _, attributes in graph.edges} >= {
+        EdgeType.CAN_CALL.value,
+        EdgeType.CAN_READ.value,
+    }
+
+
+def test_opentelemetry_manifest_discovery(tmp_path):
+    manifest = tmp_path / "telemetry.yaml"
+    manifest.write_text(
+        "otel_spans:\n"
+        "  - name: chat\n"
+        "    attributes:\n"
+        "      gen_ai.request.model: support-model\n"
+        "      http.request.method: POST\n"
+        "      http.route: /chat\n"
+        "      gen_ai.tool.name: refund\n",
+        encoding="utf-8",
+    )
+    inventory = discover_path(manifest)
+    assert inventory.counts() == {"api": 1, "model": 1, "tool": 1}
+
+
+def test_documented_installation_extras_match_prd():
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+    extras = project["optional-dependencies"]
+    expected = {"test", "api", "mcp", "rag", "dashboard", "pii", "otel", "evolution", "all"}
+    assert expected <= set(extras)

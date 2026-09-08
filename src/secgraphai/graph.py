@@ -75,6 +75,11 @@ class SecurityGraph:
     def nodes(self) -> list[tuple[str, dict[str, Any]]]:
         return list(self._graph.nodes(data=True))
 
+    @property
+    def edges(self) -> list[tuple[str, str, dict[str, Any]]]:
+        """Return graph edges and their attributes without exposing the backend."""
+        return list(self._graph.edges(data=True))
+
     def paths(
         self, sources: Iterable[str], destinations: Iterable[str], cutoff: int = 8
     ) -> list[list[str]]:

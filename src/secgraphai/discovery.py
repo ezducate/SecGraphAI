@@ -12,7 +12,7 @@ import yaml
 
 from secgraphai.graph import EdgeType, NodeType, SecurityGraph
 from secgraphai.security import Scope, ScopeGuard
-from secgraphai.targets import APITarget, Endpoint, discover_openapi
+from secgraphai.targets import APITarget, Endpoint, MCPClient, discover_openapi
 
 HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "options", "head"})
 
@@ -47,6 +47,8 @@ class DiscoveryInventory:
             "retriever": NodeType.RETRIEVER,
             "model": NodeType.MODEL,
             "mcp_server": NodeType.MCP_SERVER,
+            "mcp_resource": NodeType.MCP_RESOURCE,
+            "prompt": NodeType.PROMPT,
             "api": NodeType.API_ENDPOINT,
             "identity": NodeType.IDENTITY,
             "vector_store": NodeType.VECTOR_STORE,
@@ -65,6 +67,12 @@ class DiscoveryInventory:
         for agent in agents:
             for target in callable_nodes:
                 graph.add_edge(agent, target, EdgeType.CAN_CALL)
+        node_ids = {identifier for identifier, _ in graph.nodes}
+        for item in self.components:
+            server_id = item.metadata.get("mcp_server_id")
+            if isinstance(server_id, str) and server_id in node_ids and item.id in node_ids:
+                edge = EdgeType.CAN_READ if item.kind == "mcp_resource" else EdgeType.CAN_CALL
+                graph.add_edge(server_id, item.id, edge)
         return graph
 
 
@@ -225,6 +233,42 @@ def _discover_manifest(path: Path, inventory: DiscoveryInventory) -> None:
                         {"host": url.hostname, "trust": "external"},
                     )
                 )
+    spans = raw.get("otel_spans", [])
+    if isinstance(spans, list):
+        for index, span in enumerate(spans):
+            if not isinstance(span, dict):
+                continue
+            attributes = span.get("attributes", {})
+            if not isinstance(attributes, dict):
+                continue
+            model = attributes.get("gen_ai.request.model") or attributes.get("gen_ai.model")
+            if model:
+                inventory.add(
+                    DiscoveredComponent(
+                        f"model:{model}",
+                        "model",
+                        str(path),
+                        {"model": str(model), "span": str(span.get("name", index))},
+                    )
+                )
+            route = attributes.get("http.route")
+            method = attributes.get("http.request.method") or attributes.get("http.method")
+            if route and method:
+                inventory.add(
+                    DiscoveredComponent(
+                        f"api:{str(method).upper()}:{route}",
+                        "api",
+                        str(path),
+                        {"method": str(method).upper(), "path": str(route), "source": "otel"},
+                    )
+                )
+            tool = attributes.get("tool.name") or attributes.get("gen_ai.tool.name")
+            if tool:
+                inventory.add(
+                    DiscoveredComponent(
+                        f"tool:{tool}", "tool", str(path), {"name": str(tool), "source": "otel"}
+                    )
+                )
 
 
 async def discover_url(
@@ -261,6 +305,49 @@ async def discover_url(
     inventory = DiscoveryInventory()
     for endpoint in discover_openapi(document):
         _add_endpoint(endpoint, url, inventory)
+    return inventory
+
+
+async def discover_mcp(client: MCPClient, *, source: str = "mcp") -> DiscoveryInventory:
+    """Discover MCP capabilities through metadata calls without executing any tool."""
+    discovered = await client.discover()
+    inventory = DiscoveryInventory()
+    server_info = discovered.server.get("serverInfo", {})
+    if not isinstance(server_info, dict):
+        server_info = {}
+    server_name = str(discovered.server.get("name") or server_info.get("name") or "server")
+    server_id = f"mcp:{server_name}"
+    inventory.add(DiscoveredComponent(server_id, "mcp_server", source, dict(discovered.server)))
+    for index, tool in enumerate(discovered.tools):
+        name = str(tool.get("name") or index)
+        inventory.add(
+            DiscoveredComponent(
+                f"mcp-tool:{server_name}:{name}",
+                "tool",
+                source,
+                {**tool, "mcp_server_id": server_id},
+            )
+        )
+    for index, resource in enumerate(discovered.resources):
+        name = str(resource.get("uri") or resource.get("name") or index)
+        inventory.add(
+            DiscoveredComponent(
+                f"mcp-resource:{server_name}:{name}",
+                "mcp_resource",
+                source,
+                {**resource, "mcp_server_id": server_id},
+            )
+        )
+    for index, prompt in enumerate(discovered.prompts):
+        name = str(prompt.get("name") or index)
+        inventory.add(
+            DiscoveredComponent(
+                f"mcp-prompt:{server_name}:{name}",
+                "prompt",
+                source,
+                {**prompt, "mcp_server_id": server_id},
+            )
+        )
     return inventory
 
 

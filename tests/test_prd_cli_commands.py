@@ -119,16 +119,21 @@ def test_cli_cve_sbom_pack_plugin_engines_and_openapi(tmp_path):
 def test_cli_cve_sync_incrementally_preserves_existing_records(tmp_path, monkeypatch):
     cache = tmp_path / "cve.json"
     VulnerabilityCache(cache).save([Vulnerability("CVE-OLD", "old", 4)])
+    starts = []
 
-    async def search(client, query):
-        client.response_metadata = {"etag": '"current"'}
+    async def search(client, query, *, start_index=0):
+        starts.append(start_index)
+        client.response_metadata = {"etag": '"current"', "next_start_index": 2000}
         return [Vulnerability("CVE-NEW", query, 8)]
 
     monkeypatch.setattr("secgraphai.cli.NVDClient.search", search)
     result = invoke(["cve", "sync", "--query", "demo", "--cache", cache])
     output = json.loads(result.output)
     assert output["fetched"] == 1 and output["cached"] == 2
+    assert output["resumed_from"] == 0
     assert output["metadata"]["etag"] == '"current"'
+    resumed = json.loads(invoke(["cve", "sync", "--query", "demo", "--cache", cache]).output)
+    assert resumed["resumed_from"] == 2000 and starts == [0, 2000]
     assert {item.id for item in VulnerabilityCache(cache).search("")} == {
         "CVE-OLD",
         "CVE-NEW",

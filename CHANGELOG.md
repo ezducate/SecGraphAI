@@ -10,6 +10,9 @@ Versioning and the format is based on Keep a Changelog.
 - Added four independent model roles, boundary-progress adaptive search, and a package-driven
   six-behavior vulnerable/hardened benchmark.
 - Added incremental CVE cache metadata/freshness and digest-pinned container plugin isolation.
+- Added resumable, rate-aware NVD paging and all PRD-documented installation extras.
+- Added MCP and OpenTelemetry architecture discovery with graph relationships and public APIs.
+- Added a detailed user guide with callback, model, API, RAG, MCP, agent, CI, and dashboard scenarios.
 - Expanded security and integration coverage to more than 450 tests.
 
 ## [1.0.0rc1] - 2026-09-07

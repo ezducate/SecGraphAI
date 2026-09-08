@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -515,41 +516,76 @@ class NVDClient:
         )
         self.response_metadata: dict[str, object] = {}
 
-    async def search(self, query: str) -> list[Vulnerability]:
+    async def search(self, query: str, *, start_index: int = 0) -> list[Vulnerability]:
+        if start_index < 0:
+            raise ValueError("NVD start index cannot be negative")
         headers = (
             {"apiKey": os.environ[self.api_key_env]} if os.environ.get(self.api_key_env) else {}
         )
         async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
-            async with client.stream(
-                "GET",
-                self.endpoint,
-                params={"keywordSearch": query, "resultsPerPage": 2000},
-                headers=headers,
-            ) as response:
-                self.response_metadata = {
-                    key: value
-                    for key, value in {
-                        "etag": response.headers.get("etag"),
-                        "last_modified": response.headers.get("last-modified"),
-                        "retry_after": response.headers.get("retry-after"),
-                    }.items()
-                    if value
-                }
-                response.raise_for_status()
-                chunks: list[bytes] = []
-                size = 0
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > self.max_response_bytes:
-                        raise ValueError("NVD response exceeds configured limit")
-                    chunks.append(chunk)
+            for attempt in range(2):
+                async with client.stream(
+                    "GET",
+                    self.endpoint,
+                    params={
+                        "keywordSearch": query,
+                        "resultsPerPage": 2000,
+                        "startIndex": start_index,
+                    },
+                    headers=headers,
+                ) as response:
+                    self.response_metadata = {
+                        key: value
+                        for key, value in {
+                            "etag": response.headers.get("etag"),
+                            "last_modified": response.headers.get("last-modified"),
+                            "retry_after": response.headers.get("retry-after"),
+                        }.items()
+                        if value
+                    }
+                    retry_after = response.headers.get("retry-after")
+                    if response.status_code == 429 and attempt == 0 and retry_after:
+                        try:
+                            delay = min(30.0, max(0.0, float(retry_after)))
+                        except ValueError:
+                            delay = -1
+                        if delay >= 0:
+                            await asyncio.sleep(delay)
+                            continue
+                    response.raise_for_status()
+                    chunks: list[bytes] = []
+                    size = 0
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > self.max_response_bytes:
+                            raise ValueError("NVD response exceeds configured limit")
+                        chunks.append(chunk)
+                    break
         try:
             document = json.loads(b"".join(chunks))
         except json.JSONDecodeError as exc:
             raise ValueError("NVD response is invalid JSON") from exc
         if not isinstance(document, dict):
             raise ValueError("NVD response must be an object")
-        return parse_nvd(document)
+        values = parse_nvd(document)
+        total_results = document.get("totalResults")
+        if not isinstance(total_results, int) or total_results < 0:
+            total_results = start_index + len(values)
+        page_size = document.get("resultsPerPage")
+        if not isinstance(page_size, int) or page_size < 0:
+            page_size = len(values)
+        next_index = start_index + page_size
+        self.response_metadata.update(
+            {
+                "query": query,
+                "start_index": start_index,
+                "total_results": total_results,
+                "results_per_page": page_size,
+                "next_start_index": next_index if next_index < total_results else None,
+                "complete": next_index >= total_results,
+            }
+        )
+        return values
 
 
 def _bounded_text(value: str, maximum: int) -> str:

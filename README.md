@@ -54,6 +54,23 @@ secgraph cve status --cache cve-cache.json
 Remote targets must be explicitly allow-listed. API keys are referenced through
 environment variables and are never serialized into reports.
 
+## Documentation
+
+The [detailed user guide](docs/USER_GUIDE.md) covers installation extras, safety modes,
+scope configuration, callback and OpenAI-compatible scans, local/OpenTelemetry/MCP
+discovery, API identity matrices, RAG isolation, agent analysis, invariants, reports,
+replay and baselines, OWASP CI gates, SBOM/CVE workflows, plugins, and the dashboard API.
+
+Common starting points:
+
+| Goal | Start with |
+| --- | --- |
+| Inventory an application without importing it | `secgraph discover ./src` |
+| Test an application callback | `secgraph scan --callback module:function` |
+| Test a model API | `secgraph scan --target https://host/v1 --model name` |
+| Add a security regression gate | `secgraph replay scan.secgraph --callback module:function --fail-on-violation` |
+| Explore saved results locally | `pip install "secgraphai[dashboard]"` and `secgraph serve` |
+
 ## Release-candidate capabilities
 
 - OpenAI-compatible async model client, bounded attack planner, prompt-injection families,

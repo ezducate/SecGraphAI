@@ -21,6 +21,13 @@ from secgraphai.core import (
     Verdict,
     Verification,
 )
+from secgraphai.discovery import (
+    DiscoveredComponent,
+    DiscoveryInventory,
+    discover_mcp,
+    discover_path,
+    discover_url,
+)
 from secgraphai.graph import EdgeType, NodeType, SecurityGraph
 from secgraphai.invariants import Invariant, InvariantEngine, invariant
 from secgraphai.model import Model
@@ -40,6 +47,8 @@ __all__ = [
     "AttackPlanner",
     "Config",
     "Confidence",
+    "DiscoveredComponent",
+    "DiscoveryInventory",
     "EdgeType",
     "Evidence",
     "Finding",
@@ -66,6 +75,9 @@ __all__ = [
     "Verdict",
     "Verification",
     "canary",
+    "discover_mcp",
+    "discover_path",
+    "discover_url",
     "invariant",
     "load_official_pack",
     "secgraph",

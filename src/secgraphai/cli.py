@@ -461,15 +461,19 @@ def cve_sync(
     query: Annotated[str, typer.Option("--query")] = "Python",
     cache: Annotated[Path, typer.Option("--cache")] = Path("cve-cache.json"),
 ) -> None:
-    client = NVDClient()
-    values = asyncio.run(client.search(query))
     stored = VulnerabilityCache(cache)
+    previous = stored.metadata()
+    next_index = previous.get("next_start_index") if previous.get("query") == query else None
+    start_index = next_index if isinstance(next_index, int) and next_index >= 0 else 0
+    client = NVDClient()
+    values = asyncio.run(client.search(query, start_index=start_index))
     merged = stored.merge(values, metadata={"query": query, **client.response_metadata})
     typer.echo(
         json.dumps(
             {
                 "fetched": merged,
                 "cached": len(stored.search("")),
+                "resumed_from": start_index,
                 "metadata": stored.metadata(),
             },
             sort_keys=True,

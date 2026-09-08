@@ -208,6 +208,49 @@ async def test_nvd_client_bounds_and_invalid_json():
     route.mock(return_value=Response(200, content=b"{"))
     with pytest.raises(ValueError, match="invalid JSON"):
         await NVDClient().search("x")
+    with pytest.raises(ValueError, match="start index"):
+        await NVDClient().search("x", start_index=-1)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_nvd_client_records_resumable_page_metadata():
+    route = respx.get(NVDClient.endpoint)
+    route.mock(
+        return_value=Response(
+            200,
+            json={
+                "startIndex": 2000,
+                "resultsPerPage": 1,
+                "totalResults": 2002,
+                "vulnerabilities": [],
+            },
+            headers={"ETag": '"page"'},
+        )
+    )
+    client = NVDClient()
+    await client.search("python", start_index=2000)
+    assert client.response_metadata == {
+        "etag": '"page"',
+        "query": "python",
+        "start_index": 2000,
+        "total_results": 2002,
+        "results_per_page": 1,
+        "next_start_index": 2001,
+        "complete": False,
+    }
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_nvd_client_honors_numeric_retry_after_once():
+    route = respx.get(NVDClient.endpoint)
+    route.side_effect = [
+        Response(429, headers={"Retry-After": "0"}),
+        Response(200, json={"vulnerabilities": [], "totalResults": 0}),
+    ]
+    assert await NVDClient().search("python") == []
+    assert route.call_count == 2
 
 
 def test_dashboard_persistence_cve_owasp_limits_and_policy(tmp_path):
