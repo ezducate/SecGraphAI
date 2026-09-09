@@ -5,6 +5,15 @@ Versioning and the format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.0.0rc3] - 2026-09-08
+
+- Added a dedicated BYOK and AI model guide covering the exact HTTP contract, PowerShell,
+  Bash, CI secrets, local Ollama, hosted OpenAI-compatible endpoints, and troubleshooting.
+- Documented when each target, attack, judge, and remediation model role is invoked and how
+  to isolate their endpoints and credentials.
+- Added mocked provider tests for bearer-header construction, environment-based key rotation,
+  missing-key behavior, direct-key precedence, and credential-safe representations.
+
 ## [1.0.0rc2] - 2026-09-07
 
 - Reworked the PyPI project page into a scenario-driven guide for real application threats.

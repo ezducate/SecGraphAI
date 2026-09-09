@@ -30,11 +30,11 @@ Python 3.11 or newer is required.
 python -m pip install --pre secgraphai
 ```
 
-The current public line is the `1.0.0rc2` release candidate. `--pre` allows pip to select
+The current public line is the `1.0.0rc3` release candidate. `--pre` allows pip to select
 it before a stable release exists. For a reproducible installation, pin it explicitly:
 
 ```bash
-python -m pip install "secgraphai==1.0.0rc2"
+python -m pip install "secgraphai==1.0.0rc3"
 python -c "from importlib.metadata import version; print(version('secgraphai'))"
 ```
 
@@ -363,8 +363,10 @@ For a controlled service on loopback, add `--allow-private` deliberately.
 
 ## Scenario: scan an OpenAI-compatible model endpoint
 
-Set credentials in the environment and point the target at the API base that precedes
-`/chat/completions`:
+SecGraphAI supports bring your own key (BYOK). Set credentials in the environment and point
+the target at the API base that precedes `/chat/completions`. The request goes directly from
+the machine running SecGraphAI to that endpoint; SecGraphAI does not operate a credential or
+model proxy:
 
 ```bash
 export STAGING_MODEL_TOKEN="..."
@@ -382,6 +384,10 @@ secgraph scan \
 On PowerShell, set the variable with
 `$env:STAGING_MODEL_TOKEN = "..."`. The variable name is recorded for reproducibility;
 the credential value is not serialized into the report.
+
+For provider endpoint patterns, PowerShell and Bash instructions, local Ollama usage,
+separate credentials for all four model roles, CI secret handling, and compatibility
+troubleshooting, read the dedicated [`BYOK_AND_MODELS.md`](BYOK_AND_MODELS.md) guide.
 
 Programmatic model clients should receive a scope guard:
 
@@ -401,6 +407,12 @@ target_model = Model(
 Keeping model roles explicit makes results easier to explain and allows independent
 providers or configurations. A model may fill more than one role, but the assignment is
 still represented in the scan manifest.
+
+The target is the system under test. The attack model is called only to mutate bounded
+probes during adaptive evolution. Judges are called only when deterministic checks did not
+already create a finding for an interaction. The remediation model is called only when a
+finding does not already include remediation. Supplying a target key alone does not silently
+enable the other three roles.
 
 ```python
 from secgraphai import Model, ModelRoles, SecGraph
@@ -929,7 +941,7 @@ a remediation removes a finding without breaking the test harness.
 
 ## Current release-candidate boundaries
 
-SecGraphAI 1.0.0rc2 provides the executable core described in the PRD, but some activities
+SecGraphAI 1.0.0rc3 provides the executable core described in the PRD, but some activities
 remain release or integration responsibilities:
 
 - framework-specific live inventory beyond built-in FastAPI-style route, static Python,

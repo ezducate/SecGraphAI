@@ -276,7 +276,7 @@ def load_pack(
         try:
             installed_version = metadata.version("secgraphai")
         except metadata.PackageNotFoundError:
-            installed_version = "1.0.0rc2"
+            installed_version = "1.0.0rc3"
     try:
         incompatible = Version(installed_version) < Version(pack.minimum_engine)
     except InvalidVersion as exc:

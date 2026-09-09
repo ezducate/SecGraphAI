@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "secgraphai"
-version = "1.0.0rc2"
+version = "1.0.0rc3"
 description = "Security testing for systems that think and act"
 readme = "README.md"
 requires-python = ">=3.11"

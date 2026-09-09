@@ -58,6 +58,8 @@ def test_pypi_readme_links_to_detailed_guides_and_uses_real_threat_scenarios():
     for expected in (
         "docs/USER_GUIDE.md",
         "docs/CLI_REFERENCE.md",
+        "docs/BYOK_AND_MODELS.md",
+        "bring your own key",
         "unauthorized refund",
         "poisoned RAG",
         "cross-tenant API access",
@@ -65,3 +67,23 @@ def test_pypi_readme_links_to_detailed_guides_and_uses_real_threat_scenarios():
         "@secgraph.tool",
     ):
         assert expected.casefold() in readme.casefold()
+
+
+def test_byok_guide_documents_implemented_model_contract_and_all_roles():
+    guide = (ROOT / "docs" / "BYOK_AND_MODELS.md").read_text(encoding="utf-8")
+
+    for expected in (
+        "api_key_env",
+        "Authorization: Bearer",
+        "/chat/completions",
+        "choices[0].message.content",
+        "Target",
+        "Attack",
+        "Judge",
+        "Remediation",
+        "--allow-private",
+        "SECGRAPH_TARGET_KEY",
+        "TEST_ERROR",
+        "mocked HTTP endpoints",
+    ):
+        assert expected.casefold() in guide.casefold()

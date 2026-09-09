@@ -7,7 +7,7 @@ systems, MCP servers, APIs, and OpenAI-compatible model endpoints. It maps trust
 runs bounded adversarial checks, enforces permissions and approvals on Python tools, captures
 sanitized evidence, and turns findings into repeatable CI regressions.
 
-Version `1.0.0rc2` is a release candidate. Use SecGraphAI only on systems you own or are
+Version `1.0.0rc3` is a release candidate. Use SecGraphAI only on systems you own or are
 explicitly authorized to assess.
 
 ## What you can use it for
@@ -34,7 +34,7 @@ python -m pip install --pre secgraphai
 For a reproducible installation:
 
 ```bash
-python -m pip install "secgraphai==1.0.0rc2"
+python -m pip install "secgraphai==1.0.0rc3"
 python -c "from importlib.metadata import version; print(version('secgraphai'))"
 ```
 
@@ -370,6 +370,10 @@ flows, and execution cycles.
 
 ## Scan a model endpoint with explicit limits
 
+SecGraphAI supports bring your own key (BYOK): the key stays in your environment and is
+sent directly from the machine running the scan to the exact model endpoint you configure.
+There is no SecGraphAI credential proxy or required model vendor.
+
 ```bash
 export STAGING_MODEL_TOKEN="..."
 secgraph scan \
@@ -387,6 +391,12 @@ secgraph scan \
 Remote targets are allow-listed to the exact supplied host and port. Private and special
 networks are blocked by default, redirects are not followed, API keys are read from named
 environment variables, and credential values are not serialized into reports.
+
+The Python API can assign independent target, attack, judge, and remediation models, each
+with its own endpoint and key. See the dedicated
+[BYOK and AI model guide](https://github.com/ezducate/SecGraphAI/blob/main/docs/BYOK_AND_MODELS.md)
+for PowerShell and Bash setup, model-role behavior, OpenAI/OpenRouter/Groq/Ollama endpoint
+patterns, local-model usage, CI secrets, compatibility limits, and troubleshooting.
 
 Available profiles are `safe`, `owasp-web-2025`, `owasp-api-2023`, `owasp-llm-2026`,
 `owasp-agentic-2026`, and `owasp-full`. Modes are `PASSIVE`, `SAFE`, `LAB`, and `CUSTOM`;
@@ -409,7 +419,7 @@ and the callback before replaying a bundle in a different environment.
 A minimal CI job can pin the tested engine and fail on new or reproduced behavior:
 
 ```yaml
-- run: python -m pip install "secgraphai==1.0.0rc2"
+- run: python -m pip install "secgraphai==1.0.0rc3"
 - run: secgraph test --callback security_target:answer --baseline production --fail-on-regression --output report.json
 - run: secgraph replay approved.secgraph --callback security_target:answer --fail-on-violation
 - run: secgraph owasp gate report.json --profile llm-2026 --minimum-percent 90
@@ -468,6 +478,7 @@ for every argument, option, default, exit behavior, and practical invocation.
 ## Documentation
 
 - [Detailed user guide](https://github.com/ezducate/SecGraphAI/blob/main/docs/USER_GUIDE.md)
+- [BYOK and AI model guide](https://github.com/ezducate/SecGraphAI/blob/main/docs/BYOK_AND_MODELS.md)
 - [Complete CLI reference](https://github.com/ezducate/SecGraphAI/blob/main/docs/CLI_REFERENCE.md)
 - [Threat model](https://github.com/ezducate/SecGraphAI/blob/main/THREAT_MODEL.md)
 - [Security policy](https://github.com/ezducate/SecGraphAI/blob/main/SECURITY.md)

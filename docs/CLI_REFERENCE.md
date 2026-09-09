@@ -1,6 +1,6 @@
 # SecGraphAI CLI reference
 
-This reference covers every command shipped in SecGraphAI `1.0.0rc2`. Run
+This reference covers every command shipped in SecGraphAI `1.0.0rc3`. Run
 `secgraph COMMAND --help` for the parser's authoritative syntax. Exit code `0` means the
 command completed successfully; individual security gates use `1` for a failed gate and
 scans/replays use `2` when a test could not execute reliably.
@@ -47,6 +47,9 @@ for a controlled lab, not a general production-scope bypass.
 ## Scanning callbacks and model endpoints
 
 `secgraph scan` requires exactly one of `--callback MODULE:FUNCTION` or `--target URL`.
+The target form supports BYOK for bearer-authenticated OpenAI Chat Completions-compatible
+endpoints. See the [BYOK and AI model guide](BYOK_AND_MODELS.md) for key handling, supported
+endpoint patterns, role separation, local models, CI configuration, and limitations.
 
 | Option | Default | Meaning |
 | --- | --- | --- |

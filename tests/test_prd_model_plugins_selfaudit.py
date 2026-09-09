@@ -39,6 +39,56 @@ async def test_model_success_env_repr_and_failures(monkeypatch):
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_model_byok_reads_environment_at_request_time_and_never_embeds_it(monkeypatch):
+    monkeypatch.setenv("ROTATING_MODEL_KEY", "first-secret")
+    model = Model(
+        base_url="https://model.test/v1",
+        model="x",
+        api_key_env="ROTATING_MODEL_KEY",
+    )
+    route = respx.post("https://model.test/v1/chat/completions").mock(
+        return_value=Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    )
+
+    await model.complete([{"role": "user", "content": "probe"}])
+    assert route.calls[0].request.headers["Authorization"] == "Bearer first-secret"
+    assert json.loads(route.calls[0].request.content) == {
+        "model": "x",
+        "messages": [{"role": "user", "content": "probe"}],
+    }
+
+    monkeypatch.setenv("ROTATING_MODEL_KEY", "rotated-secret")
+    await model.complete([])
+    assert route.calls[1].request.headers["Authorization"] == "Bearer rotated-secret"
+
+    monkeypatch.delenv("ROTATING_MODEL_KEY")
+    await model.complete([])
+    assert "Authorization" not in route.calls[2].request.headers
+    assert "first-secret" not in repr(model)
+    assert "rotated-secret" not in repr(model)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_explicit_model_key_takes_precedence_over_environment(monkeypatch):
+    monkeypatch.setenv("MODEL_KEY", "environment-secret")
+    model = Model(
+        base_url="https://model.test/v1",
+        model="x",
+        api_key="explicit-secret",
+        api_key_env="MODEL_KEY",
+    )
+    route = respx.post("https://model.test/v1/chat/completions").mock(
+        return_value=Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    )
+
+    await model.complete([])
+
+    assert route.calls[0].request.headers["Authorization"] == "Bearer explicit-secret"
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_model_response_size_limit():
     model = Model(base_url="https://model.test", model="x", max_response_bytes=2)
     respx.post("https://model.test/chat/completions").mock(
